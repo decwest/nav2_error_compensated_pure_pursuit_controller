@@ -13,6 +13,8 @@
 #include "angles/angles.h"
 #include "nav_msgs/msg/path.hpp"
 
+#include "nav2_error_compensated_pure_pursuit_controller/arc_length_lookahead.hpp"
+
 namespace nav2_error_compensated_pure_pursuit_controller
 {
 namespace ecpp_math
@@ -121,70 +123,36 @@ struct FirstOrderAngleFilter
   }
 };
 
-// Computes the signed lateral error e_y and heading error e_psi of the robot
-// with respect to the transformed plan expressed in the robot base frame
-// (robot at the origin with zero heading). The nearest point is found by
-// projecting the origin onto consecutive path segments within the first
-// search_window_m of path arc length. Path pose orientations are NOT used;
-// the tangent comes from point differences (global planners such as NavFn
-// emit identity orientations on intermediate poses).
+// Computes the signed lateral error e_y and heading error e_psi from the same continuous path
+// projection used by carrot and cusp selection. The path is in the robot base frame, so the robot
+// is at the origin with zero heading. Path pose orientations are not used.
 inline PathFrameError computePathFrameError(
-  const nav_msgs::msg::Path & transformed_plan,
-  double search_window_m)
+  const arc_length_lookahead::PathProjection & projection)
 {
   PathFrameError result;
-  const auto & poses = transformed_plan.poses;
-  if (poses.size() < 2) {
+  if (!projection.valid) {
     return result;
   }
 
-  double best_dist2 = std::numeric_limits<double>::max();
-  double best_proj_x = 0.0, best_proj_y = 0.0;
-  double best_tx = 1.0, best_ty = 0.0;
-  double arc_length = 0.0;
-  bool found = false;
-
-  for (size_t i = 0; i + 1 < poses.size(); ++i) {
-    const double ax = poses[i].pose.position.x;
-    const double ay = poses[i].pose.position.y;
-    const double bx = poses[i + 1].pose.position.x;
-    const double by = poses[i + 1].pose.position.y;
-    const double sx = bx - ax;
-    const double sy = by - ay;
-    const double seg_len2 = sx * sx + sy * sy;
-    const double seg_len = std::sqrt(seg_len2);
-    if (seg_len < 1e-9) {
-      continue;
-    }
-    // Project the origin (robot) onto the segment, clamped to [0, 1].
-    double t = -(ax * sx + ay * sy) / seg_len2;
-    t = std::clamp(t, 0.0, 1.0);
-    const double px = ax + t * sx;
-    const double py = ay + t * sy;
-    const double dist2 = px * px + py * py;
-    if (dist2 < best_dist2) {
-      best_dist2 = dist2;
-      best_proj_x = px;
-      best_proj_y = py;
-      best_tx = sx / seg_len;
-      best_ty = sy / seg_len;
-      found = true;
-    }
-    arc_length += seg_len;
-    if (arc_length > search_window_m && found) {
-      break;
-    }
-  }
-
-  if (!found) {
-    return result;
-  }
   // Left-of-path positive: e_y = n . (robot - proj) with n = (-ty, tx),
   // robot at the origin.
-  result.e_y = best_ty * best_proj_x - best_tx * best_proj_y;
-  result.e_psi = angles::normalize_angle(-std::atan2(best_ty, best_tx));
+  result.e_y =
+    projection.tangent_y * projection.position.x -
+    projection.tangent_x * projection.position.y;
+  result.e_psi = angles::normalize_angle(
+    -std::atan2(projection.tangent_y, projection.tangent_x));
   result.valid = true;
   return result;
+}
+
+// Convenience wrapper for standalone math tests and callers. A controller cycle should instead
+// project once and pass the explicit PathProjection overload above.
+inline PathFrameError computePathFrameError(
+  const nav_msgs::msg::Path & transformed_plan,
+  const double search_window_m)
+{
+  return computePathFrameError(
+    arc_length_lookahead::projectPath(transformed_plan, search_window_m));
 }
 
 struct EcppParams
@@ -289,6 +257,13 @@ inline EcppTerms computeEcppTerms(
   terms.v_gain = v_gain;
   terms.lookahead_dist = l_d;
   return terms;
+}
+
+inline double selectRegulationCurvature(
+  const EcppTerms & terms,
+  const bool use_error_compensation)
+{
+  return use_error_compensation ? terms.curvature : terms.kappa_pp;
 }
 
 }  // namespace ecpp_math

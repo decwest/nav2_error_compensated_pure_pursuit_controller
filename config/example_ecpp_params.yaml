@@ -32,6 +32,7 @@ controller_server:
       max_allowed_time_to_collision_up_to_carrot: 1.0
       use_regulated_linear_velocity_scaling: false
       use_fixed_curvature_lookahead: false
+      use_dynamic_window: false
       use_cost_regulated_linear_velocity_scaling: false
       regulated_linear_scaling_min_radius: 0.9
       regulated_linear_scaling_min_speed: 0.25
@@ -39,15 +40,14 @@ controller_server:
       allow_reversing: false
       max_robot_pose_search_dist: 10.0
       # ECPP parameters
-      ecpp.omega_n: 1.41            # target natural frequency [rad/s]
+      ecpp.use_error_compensation: true
+      ecpp.omega_n: 1.41            # configured gain-shaping parameter [rad/s]
       ecpp.zeta: 1.0                # target damping ratio [-]
       ecpp.v_epsilon: 0.05          # low-speed regularization [m/s]
       ecpp.gate_mode: "ey_only"     # ey_only | product | always_on | off
       ecpp.gate_error_on: 0.10      # relative linearization error ON threshold
       ecpp.gate_error_off: 0.50     # relative linearization error OFF threshold
       ecpp.gate_endpoint_value: 0.01
-      ecpp.omega_max: 2.0           # angular velocity clip [rad/s]
       ecpp.v_gain_source: "commanded"  # commanded | measured
       ecpp.error_search_window: 2.0    # arc length searched for the nearest segment [m]
-      ecpp.error_filter_tau: 0.0    # LPF time constant [s] on (e_y, e_psi); 0 = off.
-                                    # For noisy localization try ~0.1 (keep omega_n*tau << 1).
+      ecpp.error_filter_tau: 0.0    # LPF time constant [s] on (e_y, e_psi); 0 = off

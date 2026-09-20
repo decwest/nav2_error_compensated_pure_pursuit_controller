@@ -1,5 +1,19 @@
+// Copyright (c) 2022 Samsung Research America
 // Copyright (c) 2026 Fumiya Ohnishi
-// SPDX-License-Identifier: Apache-2.0
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// Modified to retain the continuous projection segment during path transformation.
 
 #ifndef NAV2_ERROR_COMPENSATED_PURE_PURSUIT_CONTROLLER__PATH_HANDLER_HPP_
 #define NAV2_ERROR_COMPENSATED_PURE_PURSUIT_CONTROLLER__PATH_HANDLER_HPP_
@@ -9,6 +23,7 @@
 
 #include "geometry_msgs/msg/pose_stamped.hpp"
 #include "nav2_costmap_2d/costmap_2d_ros.hpp"
+#include "nav2_error_compensated_pure_pursuit_controller/arc_length_lookahead.hpp"
 #include "nav_msgs/msg/path.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "tf2_ros/buffer.h"
@@ -23,17 +38,24 @@ namespace nav2_error_compensated_pure_pursuit_controller
  * This implementation instead finds the nearest continuous non-zero segment within the progress
  * search bound and starts transformation/pruning at that segment's front vertex. Sparse and dense
  * sampling therefore make the same progress choice, with exact ties resolved toward earlier path
- * progress. Navigation2 itself is not modified.
+ * progress. The selected projection is returned in the robot frame for error, lookahead, and
+ * cusp calculations. Navigation2 itself is not modified.
  */
 class PathHandler
 {
 public:
+  struct TransformedPlan
+  {
+    nav_msgs::msg::Path path;
+    arc_length_lookahead::PathProjection projection;
+  };
+
   PathHandler(
     tf2::Duration transform_tolerance,
     std::shared_ptr<tf2_ros::Buffer> tf,
     std::shared_ptr<nav2_costmap_2d::Costmap2DROS> costmap_ros);
 
-  nav_msgs::msg::Path transformGlobalPlan(
+  TransformedPlan transformGlobalPlan(
     const geometry_msgs::msg::PoseStamped & pose,
     double max_robot_pose_search_dist,
     bool reject_unit_path = false);

@@ -1,0 +1,25 @@
+name: ROS 2 Jazzy
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-24.04
+    env:
+      AMENT_CPPCHECK_ALLOW_SLOW_VERSIONS: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ros-tooling/setup-ros@v0.7
+        with:
+          required-ros-distributions: jazzy
+      - uses: ros-tooling/action-ros-ci@v0.4
+        with:
+          package-name: nav2_error_compensated_pure_pursuit_controller
+          target-ros2-distro: jazzy
+          import-token: ${{ secrets.GITHUB_TOKEN }}

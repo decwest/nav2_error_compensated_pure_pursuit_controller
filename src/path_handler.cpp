@@ -1,9 +1,24 @@
+// Copyright (c) 2022 Samsung Research America
 // Copyright (c) 2026 Fumiya Ohnishi
-// SPDX-License-Identifier: Apache-2.0
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// Modified to retain the continuous projection segment during path transformation.
 
 #include "nav2_error_compensated_pure_pursuit_controller/path_handler.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <iterator>
 #include <limits>
@@ -11,7 +26,6 @@
 #include <utility>
 
 #include "nav2_core/controller_exceptions.hpp"
-#include "nav2_error_compensated_pure_pursuit_controller/arc_length_lookahead.hpp"
 #include "nav2_util/geometry_utils.hpp"
 
 namespace nav2_error_compensated_pure_pursuit_controller
@@ -37,7 +51,7 @@ double PathHandler::getCostmapMaxExtent() const
   return maximum_dimension / 2.0;
 }
 
-nav_msgs::msg::Path PathHandler::transformGlobalPlan(
+PathHandler::TransformedPlan PathHandler::transformGlobalPlan(
   const geometry_msgs::msg::PoseStamped & pose,
   const double max_robot_pose_search_dist,
   const bool reject_unit_path)
@@ -97,7 +111,8 @@ nav_msgs::msg::Path PathHandler::transformGlobalPlan(
       return transformed_pose;
     };
 
-  nav_msgs::msg::Path transformed_plan;
+  TransformedPlan transformed;
+  auto & transformed_plan = transformed.path;
   std::transform(
     transformation_begin, transformation_end,
     std::back_inserter(transformed_plan.poses), transform_to_local);
@@ -110,7 +125,40 @@ nav_msgs::msg::Path PathHandler::transformGlobalPlan(
   if (transformed_plan.poses.empty()) {
     throw nav2_core::InvalidPath("Resulting plan has 0 poses in it");
   }
-  return transformed_plan;
+
+  // Keep the projection selected within max_robot_pose_search_dist. Searching the transformed
+  // path again could choose a later branch outside that bound. The selected segment is now first.
+  if (global_projection.valid) {
+    constexpr double kMinSegmentLength = 1e-9;
+    const auto & start = transformed_plan.poses[0].pose.position;
+    const auto & end = transformed_plan.poses[1].pose.position;
+    const double dx = end.x - start.x;
+    const double dy = end.y - start.y;
+    const double segment_length = std::hypot(dx, dy);
+    if (segment_length > kMinSegmentLength) {
+      auto & projection = transformed.projection;
+      projection.valid = true;
+      projection.interpolation_ratio = global_projection.interpolation_ratio;
+      projection.position.x = start.x + projection.interpolation_ratio * dx;
+      projection.position.y = start.y + projection.interpolation_ratio * dy;
+      projection.tangent_x = dx / segment_length;
+      projection.tangent_y = dy / segment_length;
+      projection.arc_length = projection.interpolation_ratio * segment_length;
+
+      // Arc lengths refer to the retained, costmap-clipped path, not to the full global plan.
+      for (size_t index = 0; index + 1 < transformed_plan.poses.size(); ++index) {
+        const auto & p0 = transformed_plan.poses[index].pose.position;
+        const auto & p1 = transformed_plan.poses[index + 1].pose.position;
+        const double length = std::hypot(p1.x - p0.x, p1.y - p0.y);
+        if (length > kMinSegmentLength) {
+          projection.path_length += length;
+        }
+      }
+      projection.remaining_arc_length = std::max(
+        projection.path_length - projection.arc_length, 0.0);
+    }
+  }
+  return transformed;
 }
 
 bool PathHandler::transformPose(

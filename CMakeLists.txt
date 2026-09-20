@@ -67,6 +67,8 @@ install(DIRECTORY config
 pluginlib_export_plugin_description_file(nav2_core nav2_error_compensated_pure_pursuit_controller.xml)
 
 if(BUILD_TESTING)
+  find_package(ament_lint_auto REQUIRED)
+  ament_lint_auto_find_test_dependencies()
   find_package(ament_cmake_gtest REQUIRED)
   ament_add_gtest(test_ecpp_math
     test/test_ecpp_math.cpp
@@ -92,18 +94,6 @@ if(BUILD_TESTING)
     )
   endif()
 
-  ament_add_gtest(test_dwpp_functions
-    test/test_dwpp_functions.cpp
-  )
-  if(TARGET test_dwpp_functions)
-    ament_target_dependencies(test_dwpp_functions
-      ${dependencies}
-    )
-    target_include_directories(test_dwpp_functions PUBLIC
-      include
-    )
-  endif()
-
   ament_add_gtest(test_controller_options
     test/test_controller_options.cpp
   )
@@ -113,6 +103,9 @@ if(BUILD_TESTING)
     )
     target_include_directories(test_controller_options PUBLIC
       include
+    )
+    target_compile_definitions(test_controller_options PRIVATE
+      TEST_CONFIG_DIR="${CMAKE_CURRENT_SOURCE_DIR}/config"
     )
     target_link_libraries(test_controller_options
       ${library_name}

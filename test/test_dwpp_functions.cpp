@@ -12,10 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "nav2_error_compensated_pure_pursuit_controller/dynamic_window_pure_pursuit_functions.hpp"
+#include "nav2_regulated_pure_pursuit_controller/dynamic_window_pure_pursuit_functions.hpp"
 #include "gtest/gtest.h"
 
-using namespace nav2_error_compensated_pure_pursuit_controller::dynamic_window_pure_pursuit; // NOLINT
+using namespace nav2_regulated_pure_pursuit_controller::dynamic_window_pure_pursuit; // NOLINT
 
 
 TEST(DynamicWindowPurePursuitTest, computeDynamicWindow)

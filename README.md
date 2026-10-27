@@ -26,12 +26,25 @@ K_y = (omega_n / v_g)^2,  K_psi = 2 * zeta * omega_n / v_g
   no gate: it uses the bounded `sin(e_psi)` form, which matches the exact
   heading dependence of the pure pursuit curvature.
 
-The implementation inherits `nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController`
-(Jazzy API), uses a plugin-local path handler to retain the active segment's
-predecessor, and replaces the carrot and command-synthesis steps, mirroring
-[nav2_dynamic_window_pure_pursuit_controller](https://github.com/Decwest/nav2_dynamic_window_pure_pursuit_controller).
-RPP speed regulation, rotate-to-heading, and collision checking are reused;
-lookahead selection is the continuous arc-length implementation described above.
+The implementation inherits the **ROS 2 Lyrical**
+`nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController`.
+It uses the distribution's RPP parameter handler and
+[`dynamic_window_pure_pursuit::computeDynamicWindowVelocities`](https://github.com/ros-navigation/navigation2/blob/1.5.2/nav2_regulated_pure_pursuit_controller/include/nav2_regulated_pure_pursuit_controller/dynamic_window_pure_pursuit_functions.hpp),
+without a Navigation2 fork or a local copy of DWPP.
+
+The control order is PP curvature, RPP speed regulation, ECPP curvature
+compensation, optional DWPP velocity selection, then collision checking on the
+final command. Rotate-to-heading and speed-limit handling use the RPP base class.
+The `commanded` gain speed is the absolute regulated speed **before** DWPP;
+`measured` uses the absolute odometry speed. DWPP can change the realized
+curvature when the acceleration window prevents the requested command, so
+constrained tracking responses must be evaluated separately from ECPP alone.
+
+`newPathReceived()` supplies the raw plan to the plugin-local transformer, which
+retains the active segment's predecessor for continuous projection and arc-length
+lookahead. The Controller Server's processed plan and global goal are used by
+the new goal-checker API. This is compatible with the standard FeasiblePathHandler;
+it does not implement lane selection or consume lane-modified plans.
 
 ## Parameters
 
@@ -67,12 +80,31 @@ colcon build --symlink-install --packages-select nav2_error_compensated_pure_pur
 colcon test --packages-select nav2_error_compensated_pure_pursuit_controller
 ```
 
-Requires ROS 2 Jazzy with `ros-jazzy-navigation2` (the RPP base-class API of
-the Jazzy release line).
+Requires ROS 2 Lyrical with `ros-lyrical-navigation2` (Nav2 1.5.2 or a compatible
+Lyrical release) and C++20. The Jazzy implementation remains on the existing branch.
 
 ## Example configuration
 
 See [config/example_ecpp_params.yaml](config/example_ecpp_params.yaml).
+Keep this plugin and the same arc-length lookahead for all four comparisons:
+
+| `ecpp.use_error_compensation` | `use_dynamic_window` | Behavior |
+| --- | --- | --- |
+| false | false | Arc-length PP with RPP speed regulation |
+| true | false | ECPP |
+| false | true | DWPP using arc-length PP curvature |
+| true | true | DWPP using ECPP curvature |
+
+Use the inherited `max_linear_vel`, `min_linear_vel`, `max_angular_vel`,
+`min_angular_vel`, and signed acceleration/deceleration parameters for DWPP.
+Lyrical retains `desired_linear_vel` as a deprecated alias; prefer `max_linear_vel`.
+For a legacy-only `ecpp.omega_max` startup override, this plugin forwards the
+value and subsequent updates to the canonical `max_angular_vel` parameter.
+An explicit canonical startup setting takes precedence.
+
+A WHILL deployment using `Twist` must set `enable_stamped_cmd_vel: false` in
+Controller Server and downstream command consumers. This is independent of the
+controller plugin's `TwistStamped` return type.
 
 ## Notes
 

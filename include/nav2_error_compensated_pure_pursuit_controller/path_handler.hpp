@@ -11,7 +11,7 @@
 #include "nav2_costmap_2d/costmap_2d_ros.hpp"
 #include "nav_msgs/msg/path.hpp"
 #include "rclcpp/rclcpp.hpp"
-#include "tf2_ros/buffer.h"
+#include "nav2_ros_common/tf2_factories.hpp"
 
 namespace nav2_error_compensated_pure_pursuit_controller
 {
@@ -30,7 +30,7 @@ class PathHandler
 public:
   PathHandler(
     tf2::Duration transform_tolerance,
-    std::shared_ptr<tf2_ros::Buffer> tf,
+    nav2::TransformBuffer::SharedPtr tf,
     std::shared_ptr<nav2_costmap_2d::Costmap2DROS> costmap_ros);
 
   nav_msgs::msg::Path transformGlobalPlan(
@@ -52,7 +52,7 @@ private:
 
   rclcpp::Logger logger_{rclcpp::get_logger("ECPPPathHandler")};
   tf2::Duration transform_tolerance_;
-  std::shared_ptr<tf2_ros::Buffer> tf_;
+  nav2::TransformBuffer::SharedPtr tf_;
   std::shared_ptr<nav2_costmap_2d::Costmap2DROS> costmap_ros_;
   nav_msgs::msg::Path global_plan_;
 };

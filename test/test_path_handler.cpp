@@ -9,7 +9,7 @@
 #include "nav2_error_compensated_pure_pursuit_controller/arc_length_lookahead.hpp"
 #include "nav2_error_compensated_pure_pursuit_controller/path_handler.hpp"
 #include "rclcpp/rclcpp.hpp"
-#include "rclcpp_lifecycle/lifecycle_node.hpp"
+#include "nav2_ros_common/lifecycle_node.hpp"
 
 namespace ecpp_controller = nav2_error_compensated_pure_pursuit_controller;
 
@@ -62,9 +62,12 @@ nav_msgs::msg::Path makePath(
 
 TEST(EcppPathHandler, RetainsProjectionSegmentPredecessorAcrossPruning)
 {
-  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("ecpp_path_handler_test");
+  auto node = std::make_shared<nav2::LifecycleNode>("ecpp_path_handler_test");
   auto transform_buffer = std::make_shared<tf2_ros::Buffer>(node->get_clock());
-  auto costmap = std::make_shared<nav2_costmap_2d::Costmap2DROS>("ecpp_path_handler_costmap");
+  rclcpp::NodeOptions options;
+  options.parameter_overrides({rclcpp::Parameter("plugins", std::vector<std::string>{})});
+  auto costmap = std::make_shared<nav2_costmap_2d::Costmap2DROS>(
+    "ecpp_path_handler_costmap", "", false, options);
   costmap->on_configure(rclcpp_lifecycle::State());
 
   ecpp_controller::PathHandler handler(
@@ -103,9 +106,12 @@ TEST(EcppPathHandler, RetainsProjectionSegmentPredecessorAcrossPruning)
 
 TEST(EcppPathHandler, ContinuousSegmentSelectionBeatsNearbyFutureVertex)
 {
-  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("ecpp_sparse_handler_test");
+  auto node = std::make_shared<nav2::LifecycleNode>("ecpp_sparse_handler_test");
   auto transform_buffer = std::make_shared<tf2_ros::Buffer>(node->get_clock());
-  auto costmap = std::make_shared<nav2_costmap_2d::Costmap2DROS>("ecpp_sparse_handler_costmap");
+  rclcpp::NodeOptions options;
+  options.parameter_overrides({rclcpp::Parameter("plugins", std::vector<std::string>{})});
+  auto costmap = std::make_shared<nav2_costmap_2d::Costmap2DROS>(
+    "ecpp_sparse_handler_costmap", "", false, options);
   costmap->on_configure(rclcpp_lifecycle::State());
 
   ecpp_controller::PathHandler handler(
@@ -136,10 +142,12 @@ TEST(EcppPathHandler, ContinuousSegmentSelectionBeatsNearbyFutureVertex)
 
 TEST(EcppPathHandler, SelfIntersectionTieRetainsEarlierProgressSegment)
 {
-  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("ecpp_crossing_handler_test");
+  auto node = std::make_shared<nav2::LifecycleNode>("ecpp_crossing_handler_test");
   auto transform_buffer = std::make_shared<tf2_ros::Buffer>(node->get_clock());
-  auto costmap =
-    std::make_shared<nav2_costmap_2d::Costmap2DROS>("ecpp_crossing_handler_costmap");
+  rclcpp::NodeOptions options;
+  options.parameter_overrides({rclcpp::Parameter("plugins", std::vector<std::string>{})});
+  auto costmap = std::make_shared<nav2_costmap_2d::Costmap2DROS>(
+    "ecpp_crossing_handler_costmap", "", false, options);
   costmap->on_configure(rclcpp_lifecycle::State());
 
   ecpp_controller::PathHandler handler(

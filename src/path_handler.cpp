@@ -21,7 +21,7 @@ using nav2_util::geometry_utils::euclidean_distance;
 
 PathHandler::PathHandler(
   tf2::Duration transform_tolerance,
-  std::shared_ptr<tf2_ros::Buffer> tf,
+  nav2::TransformBuffer::SharedPtr tf,
   std::shared_ptr<nav2_costmap_2d::Costmap2DROS> costmap_ros)
 : transform_tolerance_(transform_tolerance),
   tf_(std::move(tf)),

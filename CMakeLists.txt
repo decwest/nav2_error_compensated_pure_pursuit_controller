@@ -7,6 +7,7 @@ find_package(nav2_common REQUIRED)
 find_package(nav2_core REQUIRED)
 find_package(nav2_costmap_2d REQUIRED)
 find_package(nav2_util REQUIRED)
+find_package(nav2_ros_common REQUIRED)
 find_package(nav2_regulated_pure_pursuit_controller REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rcl_interfaces REQUIRED)
@@ -18,7 +19,7 @@ find_package(tf2 REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 
 nav2_package()
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 
 include_directories(
   include
@@ -34,11 +35,17 @@ set(dependencies
   nav_msgs
   std_msgs
   nav2_util
+  nav2_ros_common
   nav2_core
   nav2_regulated_pure_pursuit_controller
   tf2
   tf2_geometry_msgs
 )
+
+set(dependency_targets)
+foreach(dependency IN LISTS dependencies)
+  list(APPEND dependency_targets ${${dependency}_TARGETS})
+endforeach()
 
 set(library_name nav2_error_compensated_pure_pursuit_controller)
 
@@ -47,9 +54,7 @@ add_library(${library_name} SHARED
   src/path_handler.cpp
 )
 
-ament_target_dependencies(${library_name}
-  ${dependencies}
-)
+target_link_libraries(${library_name} ${dependency_targets})
 
 install(TARGETS ${library_name}
   ARCHIVE DESTINATION lib
@@ -72,9 +77,7 @@ if(BUILD_TESTING)
     test/test_ecpp_math.cpp
   )
   if(TARGET test_ecpp_math)
-    ament_target_dependencies(test_ecpp_math
-      ${dependencies}
-    )
+    target_link_libraries(test_ecpp_math ${dependency_targets})
     target_include_directories(test_ecpp_math PUBLIC
       include
     )
@@ -84,9 +87,7 @@ if(BUILD_TESTING)
     test/test_arc_length_lookahead.cpp
   )
   if(TARGET test_arc_length_lookahead)
-    ament_target_dependencies(test_arc_length_lookahead
-      ${dependencies}
-    )
+    target_link_libraries(test_arc_length_lookahead ${dependency_targets})
     target_include_directories(test_arc_length_lookahead PUBLIC
       include
     )
@@ -96,9 +97,7 @@ if(BUILD_TESTING)
     test/test_dwpp_functions.cpp
   )
   if(TARGET test_dwpp_functions)
-    ament_target_dependencies(test_dwpp_functions
-      ${dependencies}
-    )
+    target_link_libraries(test_dwpp_functions ${dependency_targets})
     target_include_directories(test_dwpp_functions PUBLIC
       include
     )
@@ -108,9 +107,7 @@ if(BUILD_TESTING)
     test/test_controller_options.cpp
   )
   if(TARGET test_controller_options)
-    ament_target_dependencies(test_controller_options
-      ${dependencies}
-    )
+    target_link_libraries(test_controller_options ${dependency_targets})
     target_include_directories(test_controller_options PUBLIC
       include
     )
@@ -123,9 +120,7 @@ if(BUILD_TESTING)
     test/test_path_handler.cpp
   )
   if(TARGET test_path_handler)
-    ament_target_dependencies(test_path_handler
-      ${dependencies}
-    )
+    target_link_libraries(test_path_handler ${dependency_targets})
     target_include_directories(test_path_handler PUBLIC
       include
     )

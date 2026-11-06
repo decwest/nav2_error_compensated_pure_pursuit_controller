@@ -1,10 +1,22 @@
+// Copyright (c) 2020 Shrijit Singh
+// Copyright (c) 2020 Samsung Research America
 // Copyright (c) 2026 Fumiya Ohnishi
-// SPDX-License-Identifier: Apache-2.0
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// Modified for continuous arc-length lookahead and ECPP curvature compensation.
 
-#ifndef \
-  NAV2_ERROR_COMPENSATED_PURE_PURSUIT_CONTROLLER__ERROR_COMPENSATED_PURE_PURSUIT_CONTROLLER_HPP_
-#define \
-  NAV2_ERROR_COMPENSATED_PURE_PURSUIT_CONTROLLER__ERROR_COMPENSATED_PURE_PURSUIT_CONTROLLER_HPP_
+#pragma once
 
 #include <memory>
 #include <string>
@@ -26,7 +38,7 @@ namespace nav2_error_compensated_pure_pursuit_controller
 
 /**
  * @class ErrorCompensatedPurePursuitController
- * @brief Pure pursuit with optional ECPP curvature compensation and DWPP command synthesis.
+ * @brief Pure pursuit with gated ECPP curvature compensation.
  *
  * The curvature command is
  *   kappa = kappa_pp - sigma(e_y) * (dK_y * e_y + dK_psi * sin(e_psi))
@@ -67,24 +79,16 @@ protected:
 
   void updateParameters(const std::vector<rclcpp::Parameter> & parameters);
 
-  bool use_error_compensation_{false};
-  bool use_legacy_omega_max_alias_{false};
+  bool ecpp_publish_debug_{false};
   ecpp_math::EcppParams ecpp_params_;
-  // Deprecated; aliases max_angular_vel only for a legacy-only startup override.
-  double ecpp_omega_max_{2.0};
-  double ecpp_error_search_window_{2.0};
   std::string ecpp_v_gain_source_{"commanded"};  // "commanded" | "measured"
-  ecpp_math::FirstOrderFilter e_y_filter_;
-  ecpp_math::FirstOrderAngleFilter e_psi_filter_;
   std::unique_ptr<PathHandler> ecpp_path_handler_;
   rclcpp::Clock::SharedPtr clock_;
 
   double max_robot_pose_search_dist_{2.0};
   nav2::Publisher<nav_msgs::msg::Path>::SharedPtr global_path_pub_;
   nav2::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr
-  ecpp_debug_pub_;
-  rclcpp::node_interfaces::PreSetParametersCallbackHandle::SharedPtr
-    legacy_parameter_handler_;
+    ecpp_debug_pub_;
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr
     parameter_validation_handler_;
   rclcpp::node_interfaces::PostSetParametersCallbackHandle::SharedPtr
@@ -92,6 +96,3 @@ protected:
 };
 
 }  // namespace nav2_error_compensated_pure_pursuit_controller
-
-#endif \
-  // NAV2_ERROR_COMPENSATED_PURE_PURSUIT_CONTROLLER__ERROR_COMPENSATED_PURE_PURSUIT_CONTROLLER_HPP_

@@ -1,128 +1,135 @@
-# nav2_error_compensated_pure_pursuit_controller
+# Error-Compensated Pure Pursuit for Nav2
 
-Nav2 controller plugin for **Error-Compensated Pure Pursuit (ECPP)**.
+ROS 2 Lyrical controller plugin for **Error-Compensated Pure Pursuit (ECPP)**,
+built on Nav2's Regulated Pure Pursuit (RPP).
 
-ECPP keeps the pure pursuit curvature as a base command and adds gated
-difference-gain error feedback shaped by the configured `omega_n` and damping
-ratio `zeta`:
+ECPP adds a gated error-feedback compensation to the Pure Pursuit (PP) curvature so that a natural frequency and a damping ratio shape the transient response independently of the lookahead distance, while the robot still approaches the path from large tracking errors as PP does.
 
-```
-kappa = kappa_pp - sigma(e_y) * [ (K_y - 2/L_d^2) * e_y + (K_psi - 2/L_d) * sin(e_psi) ]
-v_g = |v| + 0.05
-K_y = (omega_n / v_g)^2,  K_psi = 2 * zeta * omega_n / v_g
-```
+## Installation
 
-- `kappa_pp`: pure pursuit curvature to the carrot selected `L_d` metres of
-  polyline arc length ahead of the continuous robot projection.
-- `L_d`: the configured nominal arc-length lookahead, not the robot-to-carrot
-  chord. It is also used in the intrinsic PP difference gains and gate.
-- `e_y`, `e_psi`: lateral and heading tracking errors in the path frame,
-  computed by projecting the robot onto the transformed plan (path pose
-  orientations are not used; tangents come from point differences).
-- `sigma(e_y)`: decreasing sigmoid gate driven by the lateral relative
-  linearization error `(e_y / L_d)^2`. Near the path the compensation is fully
-  active; far from the path the command smoothly reverts to plain pure
-  pursuit, preserving its geometric capture behavior. The heading term needs
-  no gate: it uses the bounded `sin(e_psi)` form, which matches the exact
-  heading dependence of the pure pursuit curvature.
+Assumes ROS 2 Lyrical and Nav2 are already installed.
 
-The implementation inherits the **ROS 2 Lyrical**
-`nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController`.
-It uses the distribution's RPP parameter handler and
-[`dynamic_window_pure_pursuit::computeDynamicWindowVelocities`](https://github.com/ros-navigation/navigation2/blob/1.5.2/nav2_regulated_pure_pursuit_controller/include/nav2_regulated_pure_pursuit_controller/dynamic_window_pure_pursuit_functions.hpp),
-without a Navigation2 fork or a local copy of DWPP.
+1. Clone this unpublished release branch from its local checkout into your
+   workspace's `src/` directory:
 
-The control order is PP curvature, RPP speed regulation, ECPP curvature
-compensation, optional DWPP velocity selection, then collision checking on the
-final command. Rotate-to-heading and speed-limit handling use the RPP base class.
-The `commanded` gain speed is the absolute regulated speed **before** DWPP;
-`measured` uses the absolute odometry speed. DWPP can change the realized
-curvature when the acceleration window prevents the requested command, so
-constrained tracking responses must be evaluated separately from ECPP alone.
+   ```bash
+   cd ~/ros2_ws/src
+   git clone --branch lyrical-release-20261107 \
+     /home/decwest/decwest_workspace/nav2_error_compensated_pure_pursuit_controller
+   ```
 
-`newPathReceived()` supplies the raw plan to the plugin-local transformer, which
-retains the active segment's predecessor for continuous projection and arc-length
-lookahead. The Controller Server's processed plan and global goal are used by
-the new goal-checker API. This is compatible with the standard FeasiblePathHandler;
-it does not implement lane selection or consume lane-modified plans.
+2. Build the package from the workspace root:
+
+   ```bash
+   cd ~/ros2_ws
+   colcon build --symlink-install --packages-select nav2_error_compensated_pure_pursuit_controller
+   source install/setup.bash
+   ```
+
+3. Configure Nav2 to use ECPP:
+
+   ```yaml
+   controller_server:
+     ros__parameters:
+       controller_plugins: ["FollowPath"]
+       FollowPath:
+         plugin: "nav2_error_compensated_pure_pursuit_controller::ErrorCompensatedPurePursuitController"
+   ```
+
+   See [config/example_param.yaml](config/example_param.yaml) for an example
+   controller configuration.
 
 ## Parameters
 
-In addition to all regulated pure pursuit parameters:
+Set parameters under the controller ID (for example, `FollowPath`).
+The [example configuration](config/example_param.yaml) uses:
 
-| Parameter | Default | Description |
-| --- | --- | --- |
-| `ecpp.use_error_compensation` | `false` | Enable ECPP compensation; when false the controller uses the continuous-projection PP curvature |
-| `ecpp.omega_n` | 1.0 | Configured gain-shaping parameter [rad/s] |
-| `ecpp.zeta` | 1.0 | Target damping ratio [-] |
-| `ecpp.v_epsilon` | 0.05 | Low-speed regularization added to the gain speed [m/s] |
-| `ecpp.gate_mode` | `ey_only` | `ey_only` \| `product` \| `always_on` \| `off` |
-| `ecpp.gate_error_on` | 0.10 | Relative linearization error where the gate is ~fully on |
-| `ecpp.gate_error_off` | 0.50 | Relative linearization error where the gate is ~fully off |
-| `ecpp.gate_endpoint_value` | 0.01 | Gate residual `p` at the on/off thresholds |
-| `ecpp.v_gain_source` | `commanded` | Speed used in the gains: this cycle's regulated command (`commanded`) or odometry (`measured`) |
-| `ecpp.error_search_window` | 2.0 | Path arc length searched for the nearest segment [m] |
-| `ecpp.error_filter_tau` | 0.0 | First-order low-pass time constant [s] applied to the error signals (`e_y`, `e_psi`) fed to the compensation; 0 disables. Standard derivative-filtering practice for noisy localization — try ~0.1 s (cutoff ~1.6 Hz) and keep `omega_n * tau << 1` so the added phase lag stays negligible. The pure pursuit base curvature is never filtered. |
-
-All `ecpp.*` parameters are dynamically reconfigurable
-(`ros2 param set /controller_server <plugin>.ecpp.omega_n 2.12`).
-
-Debug topic: `<plugin_name>/ecpp_debug` (`std_msgs/Float64MultiArray`):
-`[e_y, e_psi, sigma, sigma_y, sigma_psi, kappa_pp, kappa, v_gain, L_d]`.
-
-## Build
-
-```bash
-cd ~/ros2_ws/src
-git clone <this repo>
-cd ~/ros2_ws
-colcon build --symlink-install --packages-select nav2_error_compensated_pure_pursuit_controller
-colcon test --packages-select nav2_error_compensated_pure_pursuit_controller
+```yaml
+max_linear_vel: 0.5
+lookahead_dist: 1.0
+ecpp.omega_n: 1.030
+ecpp.zeta: 1.0
 ```
 
-Requires ROS 2 Lyrical with `ros-lyrical-navigation2` (Nav2 1.5.2 or a compatible
-Lyrical release) and C++20. The Jazzy implementation remains on the existing branch.
-
-## Example configuration
-
-See [config/example_ecpp_params.yaml](config/example_ecpp_params.yaml).
-Keep this plugin and the same arc-length lookahead for all four comparisons:
-
-| `ecpp.use_error_compensation` | `use_dynamic_window` | Behavior |
+| Parameter | Default | Meaning |
 | --- | --- | --- |
-| false | false | Arc-length PP with RPP speed regulation |
-| true | false | ECPP |
-| false | true | DWPP using arc-length PP curvature |
-| true | true | DWPP using ECPP curvature |
+| `ecpp.omega_n` | `1.0` | Natural frequency: controls nominal local response speed [rad/s] |
+| `ecpp.zeta` | `1.0` | Damping ratio: controls nominal local damping |
+| `ecpp.v_epsilon` | `0.05` | Speed regularization for gain calculation [m/s] |
+| `ecpp.gate_mode` | `ey_only` | `ey_only`: lateral-error gate; `always_on`: full compensation; `off`: PP |
+| `ecpp.gate_error_on` | `0.10` | Relative linearization error at the ON threshold (gate value `1-p`) |
+| `ecpp.gate_error_off` | `0.50` | Relative linearization error at the OFF threshold (gate value `p`) |
+| `ecpp.gate_endpoint_value` | `0.01` | Gate endpoint value `p` (`0 < p < 0.5`) |
+| `ecpp.v_gain_source` | `commanded` | Speed used for gains: commanded speed or measured odometry (`measured`) |
+| `ecpp.publish_debug` | `false` | Publish diagnostics on `<controller_id>/ecpp_debug` |
 
-Use the inherited `max_linear_vel`, `min_linear_vel`, `max_angular_vel`,
-`min_angular_vel`, and signed acceleration/deceleration parameters for DWPP.
-Lyrical retains `desired_linear_vel` as a deprecated alias; prefer `max_linear_vel`.
-For a legacy-only `ecpp.omega_max` startup override, this plugin forwards the
-value and subsequent updates to the canonical `max_angular_vel` parameter.
-An explicit canonical startup setting takes precedence.
+The relative linearization error is `(e_y/lookahead_dist)^2`, derived for a
+straight path with zero heading error. The defaults correspond to 10% and 50%.
+Other parameters are inherited from Lyrical RPP. The plugin uses C++20,
+`nav2_ros_common`, and the distribution's `dynamic_window_pure_pursuit::computeDynamicWindowVelocities`.
+Set `use_dynamic_window: true` to apply upstream DWPP after ECPP compensation;
+`false` returns the raw curvature request. `ecpp.gate_mode: off` selects PP
+with either window setting. Collision checking uses the final command.
+`newPathReceived()` retains the raw plan; projection, carrot, and errors share
+the same transformed projection.
 
-A WHILL deployment using `Twist` must set `enable_stamped_cmd_vel: false` in
-Controller Server and downstream command consumers. This is independent of the
-controller plugin's `TwistStamped` return type.
+- Use a positive `max_linear_vel` and set `use_fixed_curvature_lookahead: false` for ECPP.
+- Configure velocity and acceleration limits in the downstream Nav2 velocity smoother.
+  For DWPP, also set the inherited linear/angular velocity and signed acceleration limits.
+- During reverse motion, the controller uses PP without error compensation.
 
-## Notes
 
-- The compensation is a forward-drive design; while reversing
-  (`allow_reversing` with a cusp behind), the gate is forced off and the
-  command falls back to plain pure pursuit.
-- Carrot selection, path-frame errors, and cusp search consume one shared
-  continuous `PathProjection` per controller cycle. Path pose orientations do
-  not define the tangent; non-zero segment differences do.
-- `use_fixed_curvature_lookahead=true` is rejected when ECPP is enabled because
-  the compensation and PP base must use the same nominal lookahead.
-- Without dynamic-window synthesis, the plugin returns the raw `v * kappa`
-  request without an internal angular-velocity clip. Apply platform limits in
-  the downstream Nav2 velocity smoother. `ecpp.omega_max` is accepted only as
-  a deprecated legacy alias for the DWPP `max_angular_vel` startup setting.
-- When less than `L_d` of path remains, the carrot is clamped to the endpoint;
-  the local gain guarantee does not cover that endpoint region.
+## Testing
+
+After building, run these commands from the workspace root:
+
+```bash
+AMENT_CPPCHECK_ALLOW_SLOW_VERSIONS=1 colcon test --packages-select nav2_error_compensated_pure_pursuit_controller
+colcon test-result --verbose
+```
+
+## Lyrical deployment
+
+The public paper configurations below retain their experiment values. Lyrical
+uses `max_linear_vel` (`desired_linear_vel` is a deprecated upstream alias) and
+Controller Server path-handler plugins such as `nav2_controller::FeasiblePathHandler`.
+Set `use_dynamic_window` explicitly; the paper configurations set it to `false`
+to preserve the original PP/ECPP comparisons. For WHILL's unstamped `Twist`, set
+`enable_stamped_cmd_vel: false` on Controller Server and downstream consumers;
+otherwise retain Lyrical's stamped default. The local transform tolerance comes
+from the costmap. `max_robot_pose_search_dist` remains a startup setting here.
+
+## Parameter migration
+
+`ecpp.use_error_compensation` is replaced by `ecpp.gate_mode` (`off` or an active
+gate). `ecpp.error_filter_tau`, `ecpp.error_search_window`, and `ecpp.omega_max`
+are removed; the projection search uses `max_robot_pose_search_dist`, and DWPP
+limits use `max_angular_vel`/`min_angular_vel`. `gate_mode: product` is removed;
+select `ey_only` for the lateral gate. Old undeclared YAML overrides can be
+silently unused by ROS, so remove them when updating a deployment.
+
+## Paper experiments
+
+- [Experiment 1](config/paper_experiment1_params.yaml): straight-path tracking
+  with PP and six ECPP gain settings.
+- [Experiment 2](config/paper_experiment2_params.yaml): indoor path tracking
+  with PP, RPP, ECPP, MPPI, and DWB.
+
+Merge these controller settings into your robot's Nav2 configuration.
+The experiment configurations disable PP-family collision checking; the
+[general example](config/example_param.yaml) enables it. Other controller
+settings in experiment 2 originate from the Jazzy paper and may need their own
+Lyrical migration (in particular MPPI); they are not ECPP runtime validation.
+
+<!-- ## Reference
+
+F. Ohnishi and M. Takahashi, "Error-Compensated Pure Pursuit for Transient
+Response Shaping and Convergence from Large Tracking Errors," 2026.
+
+The paper's simulation code is in [ecpp](https://github.com/decwest/ecpp). -->
 
 ## License
 
-Apache-2.0
+[Apache-2.0](LICENSE). The controller and path handler adapt code from
+[Nav2 Regulated Pure Pursuit](https://github.com/ros-navigation/navigation2/tree/lyrical/nav2_regulated_pure_pursuit_controller);
+upstream copyright notices are retained in the derived files.

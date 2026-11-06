@@ -1,8 +1,23 @@
+// Copyright (c) 2020 Shrijit Singh
+// Copyright (c) 2020 Samsung Research America
 // Copyright (c) 2026 Fumiya Ohnishi
-// SPDX-License-Identifier: Apache-2.0
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// Modified for continuous arc-length lookahead and ECPP curvature compensation.
 //
 // Extends nav2_regulated_pure_pursuit_controller with an arc-length carrot,
-// optional ECPP curvature compensation, and the official DWPP speed synthesis.
+// gated ECPP curvature compensation.
 
 #include \
   "nav2_error_compensated_pure_pursuit_controller/error_compensated_pure_pursuit_controller.hpp"
@@ -33,16 +48,15 @@ namespace
 
 std::string validateEcppParameters(
   const ecpp_math::EcppParams & params,
-  const double omega_max,
-  const double error_search_window,
-  const double error_filter_tau,
+  const double desired_linear_vel,
+  const double max_angular_accel,
+  const bool use_fixed_curvature_lookahead,
   const std::string & v_gain_source)
 {
   if (!std::isfinite(params.omega_n) || !std::isfinite(params.zeta) ||
     !std::isfinite(params.v_epsilon) || !std::isfinite(params.gate_error_on) ||
     !std::isfinite(params.gate_error_off) || !std::isfinite(params.gate_endpoint_value) ||
-    !std::isfinite(omega_max) || !std::isfinite(error_search_window) ||
-    !std::isfinite(error_filter_tau))
+    !std::isfinite(desired_linear_vel) || !std::isfinite(max_angular_accel))
   {
     return "ECPP numeric parameters must be finite";
   }
@@ -58,14 +72,15 @@ std::string validateEcppParameters(
   if (params.gate_endpoint_value <= 0.0 || params.gate_endpoint_value >= 0.5) {
     return "ecpp.gate_endpoint_value must be in (0, 0.5)";
   }
-  if (omega_max <= 0.0) {
-    return "ecpp.omega_max must be positive";
+  if (desired_linear_vel <= 0.0) {
+    return "max_linear_vel must be positive";
   }
-  if (error_search_window <= 0.0) {
-    return "ecpp.error_search_window must be positive";
+  if (max_angular_accel < 0.0) {
+    return "max_angular_accel must be non-negative";
   }
-  if (error_filter_tau < 0.0) {
-    return "ecpp.error_filter_tau must be non-negative";
+  if (params.gate_mode != ecpp_math::GateMode::OFF && use_fixed_curvature_lookahead) {
+    return "ECPP requires use_fixed_curvature_lookahead=false so that compensation and "
+           "pure pursuit use the same nominal lookahead";
   }
   if (v_gain_source != "commanded" && v_gain_source != "measured") {
     return "ecpp.v_gain_source must be 'commanded' or 'measured'";
@@ -108,30 +123,24 @@ std::string validateDynamicWindowParameters(
 
 struct ControllerParameterState
 {
-  bool use_error_compensation;
-  bool use_fixed_curvature_lookahead;
   ecpp_math::EcppParams ecpp_params;
-  double ecpp_omega_max;
-  double error_search_window;
-  double error_filter_tau;
-  std::string v_gain_source;
+  bool use_fixed_curvature_lookahead;
+  double desired_linear_vel;
   rpp::Parameters dynamic_window_params;  // Validation snapshot; storage is owned by RPP.
-  double max_linear_vel;
   double max_angular_accel;
+  std::string v_gain_source;
+  bool publish_debug;
 };
 
 rcl_interfaces::msg::SetParametersResult stageParameterUpdates(
   const std::vector<rclcpp::Parameter> & parameters,
   const std::string & plugin_name,
-  const bool use_legacy_omega_max_alias,
   ControllerParameterState & state)
 {
   rcl_interfaces::msg::SetParametersResult result;
   result.successful = true;
   const std::string plugin_prefix = plugin_name + ".";
   const std::string ecpp_prefix = plugin_prefix + "ecpp.";
-  bool legacy_omega_max_updated = false;
-  bool max_angular_vel_updated = false;
 
   const auto require_type = [&result](
     const rclcpp::Parameter & parameter,
@@ -147,13 +156,15 @@ rcl_interfaces::msg::SetParametersResult stageParameterUpdates(
 
   for (const auto & parameter : parameters) {
     const std::string & parameter_name = parameter.get_name();
+    const bool nominal_speed_parameter = parameter_name == plugin_prefix + "max_linear_vel" ||
+      parameter_name == plugin_prefix + "desired_linear_vel";
     if (parameter_name.rfind(ecpp_prefix, 0) == 0) {
       const std::string field = parameter_name.substr(ecpp_prefix.size());
-      if (field == "use_error_compensation") {
+      if (field == "publish_debug") {
         if (!require_type(parameter, rclcpp::ParameterType::PARAMETER_BOOL)) {
           return result;
         }
-        state.use_error_compensation = parameter.as_bool();
+        state.publish_debug = parameter.as_bool();
       } else if (field == "omega_n") {
         if (!require_type(parameter, rclcpp::ParameterType::PARAMETER_DOUBLE)) {
           return result;
@@ -195,37 +206,16 @@ rcl_interfaces::msg::SetParametersResult stageParameterUpdates(
           return result;
         }
         state.ecpp_params.gate_endpoint_value = parameter.as_double();
-      } else if (field == "omega_max") {
-        if (!require_type(parameter, rclcpp::ParameterType::PARAMETER_DOUBLE)) {
-          return result;
-        }
-        state.ecpp_omega_max = parameter.as_double();
-        legacy_omega_max_updated = true;
       } else if (field == "v_gain_source") {
         if (!require_type(parameter, rclcpp::ParameterType::PARAMETER_STRING)) {
           return result;
         }
         state.v_gain_source = parameter.as_string();
-      } else if (field == "error_search_window") {
-        if (!require_type(parameter, rclcpp::ParameterType::PARAMETER_DOUBLE)) {
-          return result;
-        }
-        state.error_search_window = parameter.as_double();
-      } else if (field == "error_filter_tau") {
-        if (!require_type(parameter, rclcpp::ParameterType::PARAMETER_DOUBLE)) {
-          return result;
-        }
-        state.error_filter_tau = parameter.as_double();
       }
       continue;
     }
 
-    if (parameter_name == plugin_prefix + "use_dynamic_window") {
-      if (!require_type(parameter, rclcpp::ParameterType::PARAMETER_BOOL)) {
-        return result;
-      }
-      state.dynamic_window_params.use_dynamic_window = parameter.as_bool();
-    } else if (parameter_name == plugin_prefix + "use_fixed_curvature_lookahead") {
+    if (parameter_name == plugin_prefix + "use_fixed_curvature_lookahead") {
       if (!require_type(parameter, rclcpp::ParameterType::PARAMETER_BOOL)) {
         return result;
       }
@@ -240,7 +230,6 @@ rcl_interfaces::msg::SetParametersResult stageParameterUpdates(
         return result;
       }
       state.dynamic_window_params.max_angular_vel = parameter.as_double();
-      max_angular_vel_updated = true;
     } else if (parameter_name == plugin_prefix + "min_angular_vel") {
       if (!require_type(parameter, rclcpp::ParameterType::PARAMETER_DOUBLE)) {
         return result;
@@ -261,32 +250,17 @@ rcl_interfaces::msg::SetParametersResult stageParameterUpdates(
         return result;
       }
       state.dynamic_window_params.max_angular_decel = parameter.as_double();
-    } else if ((parameter_name == plugin_prefix + "max_linear_vel" ||
-      parameter_name == plugin_prefix + "desired_linear_vel")) {
+    } else if (nominal_speed_parameter) {
       if (!require_type(parameter, rclcpp::ParameterType::PARAMETER_DOUBLE)) {
         return result;
       }
-      state.max_linear_vel = parameter.as_double();
+      state.desired_linear_vel = parameter.as_double();
     } else if (parameter_name == plugin_prefix + "max_angular_accel") {
       if (!require_type(parameter, rclcpp::ParameterType::PARAMETER_DOUBLE)) {
         return result;
       }
       state.max_angular_accel = parameter.as_double();
     }
-  }
-
-  // Only a startup configuration containing the legacy name without the canonical name enables
-  // aliasing. Otherwise changing ecpp.omega_max must not desynchronize the declared canonical
-  // max_angular_vel parameter from the controller state.
-  if (use_legacy_omega_max_alias && legacy_omega_max_updated && !max_angular_vel_updated) {
-    state.dynamic_window_params.max_angular_vel = state.ecpp_omega_max;
-  }
-
-  if (state.use_error_compensation && state.use_fixed_curvature_lookahead) {
-    result.successful = false;
-    result.reason =
-      "ECPP cannot be combined with use_fixed_curvature_lookahead=true because the "
-      "compensation and pure-pursuit base must use the same nominal lookahead";
   }
 
   return result;
@@ -316,15 +290,6 @@ void ErrorCompensatedPurePursuitController::configure(
   if (!node) {
     throw nav2_core::ControllerException("Unable to lock node!");
   }
-  const auto & overrides = node->get_node_parameters_interface()->get_parameter_overrides();
-  const bool has_legacy_omega_max_override = overrides.count(name + ".ecpp.omega_max") != 0;
-  use_legacy_omega_max_alias_ =
-    has_legacy_omega_max_override && overrides.count(name + ".max_angular_vel") == 0;
-  if (use_legacy_omega_max_alias_) {
-    declare_parameter_if_not_declared(
-      node.get(), name + ".max_angular_vel", overrides.at(name + ".ecpp.omega_max"));
-  }
-
   // Lyrical owns the complete RPP/DWPP parameter set and collision checker.
   RegulatedPurePursuitController::configure(parent, name, tf, costmap_ros);
   clock_ = node->get_clock();
@@ -336,7 +301,7 @@ void ErrorCompensatedPurePursuitController::configure(
 
   // ECPP-specific parameters.
   declare_parameter_if_not_declared(
-    node.get(), name + ".ecpp.use_error_compensation", rclcpp::ParameterValue(false));
+    node.get(), name + ".ecpp.publish_debug", rclcpp::ParameterValue(false));
   declare_parameter_if_not_declared(
     node.get(), name + ".ecpp.omega_n", rclcpp::ParameterValue(1.0));
   declare_parameter_if_not_declared(
@@ -352,16 +317,10 @@ void ErrorCompensatedPurePursuitController::configure(
   declare_parameter_if_not_declared(
     node.get(), name + ".ecpp.gate_endpoint_value", rclcpp::ParameterValue(0.01));
   declare_parameter_if_not_declared(
-    node.get(), name + ".ecpp.omega_max", rclcpp::ParameterValue(2.0));
-  declare_parameter_if_not_declared(
     node.get(), name + ".ecpp.v_gain_source", rclcpp::ParameterValue(std::string("commanded")));
-  declare_parameter_if_not_declared(
-    node.get(), name + ".ecpp.error_search_window", rclcpp::ParameterValue(2.0));
-  declare_parameter_if_not_declared(
-    node.get(), name + ".ecpp.error_filter_tau", rclcpp::ParameterValue(0.0));
 
   std::string gate_mode;
-  node->get_parameter(name + ".ecpp.use_error_compensation", use_error_compensation_);
+  node->get_parameter(name + ".ecpp.publish_debug", ecpp_publish_debug_);
   node->get_parameter(name + ".ecpp.omega_n", ecpp_params_.omega_n);
   node->get_parameter(name + ".ecpp.zeta", ecpp_params_.zeta);
   node->get_parameter(name + ".ecpp.v_epsilon", ecpp_params_.v_epsilon);
@@ -369,19 +328,7 @@ void ErrorCompensatedPurePursuitController::configure(
   node->get_parameter(name + ".ecpp.gate_error_on", ecpp_params_.gate_error_on);
   node->get_parameter(name + ".ecpp.gate_error_off", ecpp_params_.gate_error_off);
   node->get_parameter(name + ".ecpp.gate_endpoint_value", ecpp_params_.gate_endpoint_value);
-  node->get_parameter(name + ".ecpp.omega_max", ecpp_omega_max_);
   node->get_parameter(name + ".ecpp.v_gain_source", ecpp_v_gain_source_);
-  node->get_parameter(name + ".ecpp.error_search_window", ecpp_error_search_window_);
-  node->get_parameter(name + ".ecpp.error_filter_tau", e_y_filter_.tau);
-  e_psi_filter_.tau = e_y_filter_.tau;
-
-  if (has_legacy_omega_max_override) {
-    RCLCPP_WARN(
-      logger_,
-      "Parameter '%s.ecpp.omega_max' is deprecated and no longer clamps non-DWPP commands. "
-      "Use '%s.max_angular_vel' with use_dynamic_window instead.",
-      name.c_str(), name.c_str());
-  }
 
   try {
     ecpp_params_.gate_mode = ecpp_math::gateModeFromString(gate_mode);
@@ -390,8 +337,8 @@ void ErrorCompensatedPurePursuitController::configure(
   }
 
   const std::string ecpp_validation_error = validateEcppParameters(
-    ecpp_params_, ecpp_omega_max_, ecpp_error_search_window_, e_y_filter_.tau,
-    ecpp_v_gain_source_);
+    ecpp_params_, params_->base_max_linear_vel, params_->max_angular_accel,
+    params_->use_fixed_curvature_lookahead, ecpp_v_gain_source_);
   if (!ecpp_validation_error.empty()) {
     throw nav2_core::ControllerException(ecpp_validation_error);
   }
@@ -400,12 +347,6 @@ void ErrorCompensatedPurePursuitController::configure(
   if (!dynamic_window_validation_error.empty()) {
     throw nav2_core::ControllerException(dynamic_window_validation_error);
   }
-  if (use_error_compensation_ && params_->use_fixed_curvature_lookahead) {
-    throw nav2_core::ControllerException(
-            "ECPP cannot be combined with use_fixed_curvature_lookahead=true because the "
-            "compensation and pure-pursuit base must use the same nominal lookahead");
-  }
-
   // Plugin-local transformer retains the predecessor of the projection segment without changing
   // Navigation2's shared RPP implementation.
   ecpp_path_handler_ = std::make_unique<PathHandler>(
@@ -420,27 +361,6 @@ void ErrorCompensatedPurePursuitController::configure(
   global_path_pub_ = node->create_publisher<nav_msgs::msg::Path>("received_global_plan");
   ecpp_debug_pub_ = node->create_publisher<std_msgs::msg::Float64MultiArray>(
     plugin_name_ + "/ecpp_debug");
-  if (use_legacy_omega_max_alias_) {
-    legacy_parameter_handler_ = node->add_pre_set_parameters_callback(
-      [this](std::vector<rclcpp::Parameter> & parameters) {
-        const auto canonical = plugin_name_ + ".max_angular_vel";
-        if (std::any_of(parameters.begin(), parameters.end(),
-          [&canonical](const auto & p) {return p.get_name() == canonical;}))
-        {
-          return;
-        }
-        for (const auto & parameter : parameters) {
-          if (parameter.get_name() == plugin_name_ + ".ecpp.omega_max" &&
-            parameter.get_type() == rclcpp::ParameterType::PARAMETER_DOUBLE)
-          {
-            const double value = parameter.as_double();
-            parameters.emplace_back(canonical, value);
-            break;
-          }
-        }
-      });
-  }
-
   parameter_validation_handler_ = node->add_on_set_parameters_callback(
     std::bind(
       &ErrorCompensatedPurePursuitController::validateParameterUpdates,
@@ -467,15 +387,13 @@ geometry_msgs::msg::TwistStamped ErrorCompensatedPurePursuitController::computeV
     throw nav2_core::InvalidPath("Controller server supplied an empty path");
   }
 
-  // Transform path to robot base frame
-  auto transformed_plan = ecpp_path_handler_->transformGlobalPlan(
+  // Select the projection once and transform it together with the path to the robot base frame.
+  // Pruning, carrot, path-frame errors, and cusp search all share this progress choice.
+  const auto transformed = ecpp_path_handler_->transformGlobalPlan(
     pose, max_robot_pose_search_dist_, params_->interpolate_curvature_after_goal);
+  const auto & transformed_plan = transformed.path;
+  const auto & path_projection = transformed.projection;
   global_path_pub_->publish(transformed_plan);
-
-  // Project exactly once per cycle. Carrot, path-frame errors, and cusp search all consume this
-  // same result, so progress cannot disagree at corners or self intersections.
-  const auto path_projection = arc_length_lookahead::projectPath(
-    transformed_plan, ecpp_error_search_window_);
 
   // Find look ahead distance and point on path and publish. The nominal distance is retained for
   // the PP-equivalent ECPP gains even if the carrot distance is shortened at a reversing cusp.
@@ -524,7 +442,8 @@ geometry_msgs::msg::TwistStamped ErrorCompensatedPurePursuitController::computeV
 
   double angle_to_heading;
   if (shouldRotateToGoalHeading(
-      goal_checker, pose, global_goal, speed, transformed_global_plan)) {
+      goal_checker, pose, global_goal, speed, transformed_global_plan))
+  {
     is_rotating_to_heading_ = true;
     geometry_msgs::msg::PoseStamped goal_in_base;
     if (!ecpp_path_handler_->transformPose(
@@ -566,7 +485,7 @@ geometry_msgs::msg::TwistStamped ErrorCompensatedPurePursuitController::computeV
     terms.curvature = regulation_curvature;
     terms.lookahead_dist = nominal_lookahead_dist;
 
-    if (use_error_compensation_) {
+    if (ecpp_params_.gate_mode != ecpp_math::GateMode::OFF) {
       const auto path_error = ecpp_math::computePathFrameError(
         path_projection);
       const double v_for_gain =
@@ -577,8 +496,6 @@ geometry_msgs::msg::TwistStamped ErrorCompensatedPurePursuitController::computeV
       if (!path_error.valid || x_vel_sign < 0.0) {
         // Degenerate plan or reversing: fall back to plain pure pursuit.
         active_params.gate_mode = ecpp_math::GateMode::OFF;
-        e_y_filter_.reset();
-        e_psi_filter_.reset();
         if (x_vel_sign < 0.0) {
           RCLCPP_WARN_THROTTLE(
             logger_, *clock_, 5000,
@@ -586,14 +503,9 @@ geometry_msgs::msg::TwistStamped ErrorCompensatedPurePursuitController::computeV
         }
       }
 
-      // Filter only the error signals used by the compensation. The PP base curvature remains
-      // unfiltered so that its geometric capture behavior is unchanged.
-      const double e_y_used = e_y_filter_.update(path_error.e_y, control_duration_);
-      const double e_psi_used = e_psi_filter_.update(path_error.e_psi, control_duration_);
-
       terms = ecpp_math::computeEcppTerms(
-        regulation_curvature, e_y_used, e_psi_used,
-        nominal_lookahead_dist, v_for_gain, active_params);
+        regulation_curvature, path_error.e_y, path_error.e_psi,
+        nominal_lookahead_dist, v_for_gain, params_->base_max_linear_vel, active_params);
       if (path_projection.valid &&
         path_projection.remaining_arc_length < nominal_lookahead_dist)
       {
@@ -603,17 +515,12 @@ geometry_msgs::msg::TwistStamped ErrorCompensatedPurePursuitController::computeV
           "(%.3f m); local gain guarantee does not apply in this endpoint region.",
           path_projection.remaining_arc_length, nominal_lookahead_dist);
       }
-    } else {
-      e_y_filter_.reset();
-      e_psi_filter_.reset();
     }
 
-    regulation_curvature = ecpp_math::selectRegulationCurvature(
-      terms, use_error_compensation_);
+    regulation_curvature = terms.curvature;
+    angular_vel = linear_vel * regulation_curvature;
 
-    if (!params_->use_dynamic_window) {
-      angular_vel = linear_vel * regulation_curvature;
-    } else {
+    if (params_->use_dynamic_window) {
       std::tie(linear_vel, angular_vel) =
         dynamic_window_pure_pursuit::computeDynamicWindowVelocities(
         last_command_velocity_, params_->max_linear_vel,
@@ -627,11 +534,13 @@ geometry_msgs::msg::TwistStamped ErrorCompensatedPurePursuitController::computeV
         linear_vel, regulation_curvature, x_vel_sign, control_duration_);
     }
 
-    std_msgs::msg::Float64MultiArray debug_msg;
-    debug_msg.data = {
-      terms.e_y, terms.e_psi, terms.sigma, terms.sigma_y, terms.sigma_psi,
-      terms.kappa_pp, regulation_curvature, terms.v_gain, terms.lookahead_dist};
-    ecpp_debug_pub_->publish(debug_msg);
+    if (ecpp_publish_debug_) {
+      std_msgs::msg::Float64MultiArray debug_msg;
+      debug_msg.data = {
+        terms.e_y, terms.e_psi, terms.sigma, terms.sigma_y, terms.sigma_psi,
+        terms.kappa_pp, regulation_curvature, terms.v_gain, terms.lookahead_dist};
+      ecpp_debug_pub_->publish(debug_msg);
+    }
   }
 
   // Collision checking on this velocity heading
@@ -657,7 +566,6 @@ geometry_msgs::msg::TwistStamped ErrorCompensatedPurePursuitController::computeV
   cmd_vel.twist.angular.z = angular_vel;
 
   last_command_velocity_ = cmd_vel.twist;
-
   return cmd_vel;
 }
 
@@ -667,28 +575,22 @@ ErrorCompensatedPurePursuitController::validateParameterUpdates(
 {
   std::lock_guard<std::mutex> lock_reinit(param_handler_->getMutex());
   ControllerParameterState state{
-    use_error_compensation_, params_->use_fixed_curvature_lookahead,
-    ecpp_params_, ecpp_omega_max_, ecpp_error_search_window_,
-    e_y_filter_.tau, ecpp_v_gain_source_, *params_,
-    params_->max_linear_vel, params_->max_angular_accel};
+    ecpp_params_, params_->use_fixed_curvature_lookahead, params_->base_max_linear_vel,
+    *params_, params_->max_angular_accel, ecpp_v_gain_source_, ecpp_publish_debug_};
   auto result = stageParameterUpdates(
-    parameters, plugin_name_, use_legacy_omega_max_alias_, state);
+    parameters, plugin_name_, state);
   if (!result.successful) {
     return result;
   }
 
   result.reason = validateEcppParameters(
-    state.ecpp_params, state.ecpp_omega_max, state.error_search_window,
-    state.error_filter_tau, state.v_gain_source);
-  if (!result.reason.empty()) {
-    result.successful = false;
-    return result;
+    state.ecpp_params, state.desired_linear_vel, state.max_angular_accel,
+    state.use_fixed_curvature_lookahead, state.v_gain_source);
+  if (result.reason.empty()) {
+    result.reason = validateDynamicWindowParameters(
+      state.dynamic_window_params, state.desired_linear_vel, state.max_angular_accel);
   }
-  result.reason = validateDynamicWindowParameters(
-    state.dynamic_window_params, state.max_linear_vel, state.max_angular_accel);
-  if (!result.reason.empty()) {
-    result.successful = false;
-  }
+  result.successful = result.reason.empty();
   return result;
 }
 
@@ -697,31 +599,18 @@ void ErrorCompensatedPurePursuitController::updateParameters(
 {
   std::lock_guard<std::mutex> lock_reinit(param_handler_->getMutex());
   ControllerParameterState state{
-    use_error_compensation_, params_->use_fixed_curvature_lookahead,
-    ecpp_params_, ecpp_omega_max_, ecpp_error_search_window_,
-    e_y_filter_.tau, ecpp_v_gain_source_, *params_,
-    params_->max_linear_vel, params_->max_angular_accel};
+    ecpp_params_, params_->use_fixed_curvature_lookahead, params_->base_max_linear_vel,
+    *params_, params_->max_angular_accel, ecpp_v_gain_source_, ecpp_publish_debug_};
   const auto result = stageParameterUpdates(
-    parameters, plugin_name_, use_legacy_omega_max_alias_, state);
+    parameters, plugin_name_, state);
   if (!result.successful) {
     RCLCPP_ERROR(logger_, "Validated parameter update could not be applied: %s",
         result.reason.c_str());
     return;
   }
 
-  const bool reset_error_filters =
-    state.error_filter_tau != e_y_filter_.tau ||
-    state.use_error_compensation != use_error_compensation_;
-  use_error_compensation_ = state.use_error_compensation;
+  ecpp_publish_debug_ = state.publish_debug;
   ecpp_params_ = state.ecpp_params;
-  ecpp_omega_max_ = state.ecpp_omega_max;
-  ecpp_error_search_window_ = state.error_search_window;
-  e_y_filter_.tau = state.error_filter_tau;
-  e_psi_filter_.tau = state.error_filter_tau;
-  if (reset_error_filters) {
-    e_y_filter_.reset();
-    e_psi_filter_.reset();
-  }
   ecpp_v_gain_source_ = state.v_gain_source;
 }
 
@@ -730,17 +619,12 @@ void ErrorCompensatedPurePursuitController::activate()
   RegulatedPurePursuitController::activate();
   ecpp_debug_pub_->on_activate();
   global_path_pub_->on_activate();
-  std::lock_guard<std::mutex> lock_reinit(param_handler_->getMutex());
-  e_y_filter_.reset();
-  e_psi_filter_.reset();
 }
 
 void ErrorCompensatedPurePursuitController::newPathReceived(const nav_msgs::msg::Path & path)
 {
   std::lock_guard<std::mutex> lock_reinit(param_handler_->getMutex());
   ecpp_path_handler_->setPlan(path);
-  e_y_filter_.reset();
-  e_psi_filter_.reset();
 }
 
 void ErrorCompensatedPurePursuitController::deactivate()
@@ -755,10 +639,6 @@ void ErrorCompensatedPurePursuitController::deactivate()
 void ErrorCompensatedPurePursuitController::cleanup()
 {
   auto node = node_.lock();
-  if (node && legacy_parameter_handler_) {
-    node->remove_pre_set_parameters_callback(legacy_parameter_handler_.get());
-  }
-  legacy_parameter_handler_.reset();
   if (node && parameter_validation_handler_) {
     node->remove_on_set_parameters_callback(parameter_validation_handler_.get());
   }
@@ -780,8 +660,6 @@ void ErrorCompensatedPurePursuitController::reset()
   cancelling_ = false;
   finished_cancelling_ = false;
   last_command_velocity_ = geometry_msgs::msg::Twist();
-  e_y_filter_.reset();
-  e_psi_filter_.reset();
 }
 
 }  // namespace nav2_error_compensated_pure_pursuit_controller

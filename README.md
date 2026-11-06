@@ -60,7 +60,7 @@ ecpp.zeta: 1.0
 | `ecpp.gate_error_on` | `0.10` | Relative linearization error at the ON threshold (gate value `1-p`) |
 | `ecpp.gate_error_off` | `0.50` | Relative linearization error at the OFF threshold (gate value `p`) |
 | `ecpp.gate_endpoint_value` | `0.01` | Gate endpoint value `p` (`0 < p < 0.5`) |
-| `ecpp.v_gain_source` | `commanded` | Speed used for gains: commanded speed or measured odometry (`measured`) |
+| `ecpp.v_gain_source` | `commanded` | Gain speed: pre-DWPP regulated request (`commanded`), odometry (`measured`), or configured speed (`nominal`) |
 | `ecpp.publish_debug` | `false` | Publish diagnostics on `<controller_id>/ecpp_debug` |
 
 The relative linearization error is `(e_y/lookahead_dist)^2`, derived for a
@@ -77,6 +77,22 @@ the same transformed projection.
 - Configure velocity and acceleration limits in the downstream Nav2 velocity smoother.
   For DWPP, also set the inherited linear/angular velocity and signed acceleration limits.
 - During reverse motion, the controller uses PP without error compensation.
+
+### Nominal gain speed
+
+`ecpp.v_gain_source: nominal` uses the configured `max_linear_vel` as `v0`,
+retaining it during speed limits, regulation, and DWPP deceleration. Dynamic
+updates of `max_linear_vel` change `v0`; `setSpeedLimit()` only changes the
+requested speed. The math adds `v_epsilon` once and internally converts
+`omega_n` to `omega_n * (v0 + v_epsilon) / v0`. Thus nominal gains are exactly
+`Ky = (omega_n / v0)^2` and `Ktheta = 2*zeta*omega_n/v0`. Supply the physical
+design frequency directly; remove any external epsilon correction when
+migrating older experiment profiles.
+
+`commanded` uses the speed before DWPP, so a DWPP slowdown alone does not
+distinguish it from `nominal`. Regulation, approach, speed limits, or cancellation
+can distinguish them. `measured` uses the absolute odometry speed. Speed and
+acceleration limits remain those of upstream DWPP and the downstream smoother.
 
 
 ## Testing

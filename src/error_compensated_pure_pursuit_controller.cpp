@@ -82,8 +82,10 @@ std::string validateEcppParameters(
     return "ECPP requires use_fixed_curvature_lookahead=false so that compensation and "
            "pure pursuit use the same nominal lookahead";
   }
-  if (v_gain_source != "commanded" && v_gain_source != "measured") {
-    return "ecpp.v_gain_source must be 'commanded' or 'measured'";
+  if (v_gain_source != "commanded" && v_gain_source != "measured" &&
+    v_gain_source != "nominal")
+  {
+    return "ecpp.v_gain_source must be 'commanded', 'measured', or 'nominal'";
   }
   return "";
 }
@@ -489,8 +491,9 @@ geometry_msgs::msg::TwistStamped ErrorCompensatedPurePursuitController::computeV
       const auto path_error = ecpp_math::computePathFrameError(
         path_projection);
       const double v_for_gain =
-        (ecpp_v_gain_source_ == "measured") ?
-        std::fabs(speed.linear.x) : std::fabs(linear_vel);
+        (ecpp_v_gain_source_ == "nominal") ? params_->base_max_linear_vel :
+        ((ecpp_v_gain_source_ == "measured") ?
+        std::fabs(speed.linear.x) : std::fabs(linear_vel));
 
       ecpp_math::EcppParams active_params = ecpp_params_;
       if (!path_error.valid || x_vel_sign < 0.0) {

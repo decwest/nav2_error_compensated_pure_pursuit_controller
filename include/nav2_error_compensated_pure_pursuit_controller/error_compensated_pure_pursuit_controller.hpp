@@ -81,7 +81,7 @@ protected:
 
   bool ecpp_publish_debug_{false};
   ecpp_math::EcppParams ecpp_params_;
-  std::string ecpp_v_gain_source_{"commanded"};  // "commanded" | "measured"
+  std::string ecpp_v_gain_source_{"commanded"};  // "commanded" | "measured" | "nominal"
   std::unique_ptr<PathHandler> ecpp_path_handler_;
   rclcpp::Clock::SharedPtr clock_;
 

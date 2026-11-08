@@ -109,3 +109,22 @@ upstream copyright notices are retained in the derived files.
 `ecpp.v_gain_source: nominal` fixes gain speed to `base_desired_linear_vel + v_epsilon`.
 Speed limits and measured odometry do not retune the gains. Port of Lyrical
 11b3b42; the Jazzy public parameter remains `desired_linear_vel`.
+
+### Jazzy EC-DWPP and supervised trials
+
+`use_dynamic_window: true` applies the existing Jazzy DWPP helper to ECPP's
+compensated curvature. `dwpp.max_linear_vel`, `dwpp.max_angular_vel`,
+`dwpp.max_linear_accel`, and `dwpp.max_angular_accel` are positive configuration-only
+limits (defaults 0.5, 1.0, 0.5, 1.5). Motion is forward-only with zero lateral
+command. First control after lifecycle reset uses odometry; plan replacement
+preserves the previous command. Collision prediction remains enabled separately.
+The window limits command increments per configured controller period; physical
+acceleration and downstream safety stops require odometry validation.
+
+With `supervised_paths: true`, prepare the pair `ecpp.pending_path_stamp_ns`
+(int64 ROS path header timestamp) and `ecpp.pending_omega_n` in one atomic
+parameter request. `setPlan` accepts only that newer timestamp, replaces the
+projection/search path, and adopts the gain in the same critical section.
+`/testbed/path_adopted` is Float64MultiArray containing adoption ROS seconds,
+path stamp seconds, path stamp nanoseconds, omega_n, first x, first y.
+Action acceptance is not a substitute for this notification.

@@ -19,6 +19,8 @@
 #pragma once
 
 #include <memory>
+#include <cstdint>
+#include "nav2_dynamic_window_pure_pursuit_controller/dynamic_window_pure_pursuit_controller.hpp"
 #include <string>
 #include <vector>
 
@@ -76,6 +78,16 @@ protected:
 
   void updateParameters(const std::vector<rclcpp::Parameter> & parameters);
 
+  // Configuration-only window limits. The upstream Jazzy DWPP helper is reused.
+  nav2_dynamic_window_pure_pursuit_controller::DynamicWindowPurePursuitController window_;
+  bool use_dynamic_window_{false};
+  bool supervised_paths_{false};
+  double window_v_{0.5}, window_w_{1.0}, window_a_{0.5}, window_alpha_{1.5};
+  geometry_msgs::msg::Twist last_command_;
+  bool command_initialized_{false};
+  int64_t pending_stamp_ns_{0}, adopted_stamp_ns_{0};
+  double pending_omega_n_{1.0};
+  rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr adoption_pub_;
   bool ecpp_publish_debug_{false};
   ecpp_math::EcppParams ecpp_params_;
   std::string ecpp_v_gain_source_{"commanded"};  // "commanded" | "measured" | "nominal"

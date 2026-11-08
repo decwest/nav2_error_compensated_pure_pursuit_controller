@@ -5,6 +5,7 @@ find_package(ament_cmake REQUIRED)
 find_package(angles REQUIRED)
 find_package(nav2_common REQUIRED)
 find_package(nav2_core REQUIRED)
+find_package(nav2_dynamic_window_pure_pursuit_controller REQUIRED)
 find_package(nav2_costmap_2d REQUIRED)
 find_package(nav2_util REQUIRED)
 find_package(nav2_regulated_pure_pursuit_controller REQUIRED)
@@ -35,6 +36,7 @@ set(dependencies
   std_msgs
   nav2_util
   nav2_core
+  nav2_dynamic_window_pure_pursuit_controller
   nav2_regulated_pure_pursuit_controller
   tf2
   tf2_geometry_msgs

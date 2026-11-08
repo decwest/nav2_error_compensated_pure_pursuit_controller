@@ -238,6 +238,29 @@ void ErrorCompensatedPurePursuitController::configure(
     node, plugin_name_, logger_, costmap_->getSizeInMetersX());
   params_ = param_handler_->getParams();
 
+  rcl_interfaces::msg::ParameterDescriptor fixed;
+  fixed.read_only = true;
+  const auto fixed_bool = [&](const std::string & key, bool value) {
+      return node->declare_parameter<bool>(name + "." + key, value, fixed);
+    };
+  const auto fixed_double = [&](const std::string & key, double value) {
+      const auto result = node->declare_parameter<double>(name + "." + key, value, fixed);
+      if (!std::isfinite(result) || result <= 0.0) {
+        throw nav2_core::ControllerException(key + " must be finite and positive");
+      }
+      return result;
+    };
+  use_dynamic_window_ = fixed_bool("use_dynamic_window", false);
+  supervised_paths_ = fixed_bool("supervised_paths", false);
+  window_v_ = fixed_double("dwpp.max_linear_vel", 0.5);
+  window_w_ = fixed_double("dwpp.max_angular_vel", 1.0);
+  window_a_ = fixed_double("dwpp.max_linear_accel", 0.5);
+  window_alpha_ = fixed_double("dwpp.max_angular_accel", 1.5);
+  node->declare_parameter<int64_t>(name + ".ecpp.pending_path_stamp_ns", 0);
+  node->declare_parameter<double>(name + ".ecpp.pending_omega_n", 1.0);
+  adoption_pub_ = node->create_publisher<std_msgs::msg::Float64MultiArray>(
+    "/testbed/path_adopted", rclcpp::QoS(20).reliable());
+
   // ECPP-specific parameters.
   declare_parameter_if_not_declared(
     node.get(), name + ".ecpp.publish_debug", rclcpp::ParameterValue(false));
@@ -280,6 +303,11 @@ void ErrorCompensatedPurePursuitController::configure(
     params_->use_fixed_curvature_lookahead, ecpp_v_gain_source_);
   if (!ecpp_validation_error.empty()) {
     throw nav2_core::ControllerException(ecpp_validation_error);
+  }
+  if (use_dynamic_window_ &&
+    (params_->allow_reversing || params_->base_desired_linear_vel > window_v_))
+  {
+    throw nav2_core::ControllerException("DWPP mode requires forward motion within speed bound");
   }
   // Plugin-local transformer retains the predecessor of the projection segment without changing
   // Navigation2's shared RPP implementation.
@@ -471,6 +499,26 @@ geometry_msgs::msg::TwistStamped ErrorCompensatedPurePursuitController::computeV
     }
   }
 
+  if (use_dynamic_window_) {
+    if (!command_initialized_) {
+      last_command_ = speed;
+      last_command_.linear.y = 0.0;
+      command_initialized_ = true;
+    }
+    if (is_rotating_to_heading_) {
+      const auto bounds = window_.computeDynamicWindow(
+        last_command_, window_v_, 0.0, window_w_, -window_w_,
+        window_a_, -window_a_, window_alpha_, -window_alpha_, control_duration_);
+      linear_vel = std::clamp(0.0, bounds.min_linear_vel, bounds.max_linear_vel);
+      angular_vel = std::clamp(angular_vel, bounds.min_angular_vel, bounds.max_angular_vel);
+    } else {
+      std::tie(linear_vel, angular_vel) = window_.computeDynamicWindowVelocities(
+        last_command_, window_v_, 0.0, window_w_, -window_w_,
+        window_a_, -window_a_, window_alpha_, -window_alpha_,
+        linear_vel, regulation_curvature, 1.0, control_duration_);
+    }
+  }
+
   // Collision checking on this velocity heading
   const double & carrot_dist = hypot(carrot_pose.pose.position.x, carrot_pose.pose.position.y);
   if (params_->use_collision_detection &&
@@ -491,6 +539,7 @@ geometry_msgs::msg::TwistStamped ErrorCompensatedPurePursuitController::computeV
   cmd_vel.twist.linear.x = linear_vel;
   cmd_vel.twist.angular.z = angular_vel;
 
+  last_command_ = cmd_vel.twist;
   return cmd_vel;
 }
 
@@ -508,6 +557,46 @@ ErrorCompensatedPurePursuitController::validateParameterUpdates(
     return result;
   }
 
+  bool has_stamp = false, has_omega = false;
+  for (const auto & p : parameters) {
+    if (p.get_name() == plugin_name_ + ".ecpp.pending_path_stamp_ns") {
+      has_stamp = true;
+      if (p.get_type() != rclcpp::ParameterType::PARAMETER_INTEGER ||
+        p.as_int() <= adopted_stamp_ns_)
+      {
+        result.successful = false;
+        result.reason = "pending path stamp must be newer than adopted path";
+        return result;
+      }
+    }
+    if (p.get_name() == plugin_name_ + ".ecpp.pending_omega_n") {
+      has_omega = true;
+      if (p.get_type() != rclcpp::ParameterType::PARAMETER_DOUBLE ||
+        !std::isfinite(p.as_double()) || p.as_double() <= 0.0)
+      {
+        result.successful = false;
+        result.reason = "pending frequency must be finite and positive";
+        return result;
+      }
+    }
+    if (supervised_paths_ && p.get_name() == plugin_name_ + ".ecpp.omega_n") {
+      result.successful = false;
+      result.reason = "supervised paths require an atomic pending path/frequency pair";
+      return result;
+    }
+  }
+  if (has_stamp != has_omega) {
+    result.successful = false;
+    result.reason = "pending stamp and frequency must be set atomically";
+    return result;
+  }
+  if (use_dynamic_window_ && (state.desired_linear_vel > window_v_ ||
+    state.use_fixed_curvature_lookahead))
+  {
+    result.successful = false;
+    result.reason = "dynamic-window nominal speed or lookahead is incompatible";
+    return result;
+  }
   result.reason = validateEcppParameters(
     state.ecpp_params, state.desired_linear_vel, state.max_angular_accel,
     state.use_fixed_curvature_lookahead, state.v_gain_source);
@@ -530,6 +619,14 @@ void ErrorCompensatedPurePursuitController::updateParameters(
     return;
   }
 
+  for (const auto & p : parameters) {
+    if (p.get_name() == plugin_name_ + ".ecpp.pending_path_stamp_ns") {
+      pending_stamp_ns_ = p.as_int();
+    }
+    if (p.get_name() == plugin_name_ + ".ecpp.pending_omega_n") {
+      pending_omega_n_ = p.as_double();
+    }
+  }
   ecpp_publish_debug_ = state.publish_debug;
   ecpp_params_ = state.ecpp_params;
   ecpp_v_gain_source_ = state.v_gain_source;
@@ -545,13 +642,29 @@ void ErrorCompensatedPurePursuitController::setPlan(const nav_msgs::msg::Path & 
 {
   std::lock_guard<std::mutex> lock_reinit(param_handler_->getMutex());
   has_reached_xy_tolerance_ = false;
-  ecpp_path_handler_->setPlan(path);
+  const int64_t stamp = rclcpp::Time(path.header.stamp).nanoseconds();
+  if (path.poses.size() < 2 ||
+    (supervised_paths_ && (stamp != pending_stamp_ns_ || stamp <= adopted_stamp_ns_)))
+  {
+    throw nav2_core::InvalidPath("Unprepared, stale, or empty supervised path");
+  }
+  if (stamp == pending_stamp_ns_) {
+    ecpp_params_.omega_n = pending_omega_n_;
+  }
+  ecpp_path_handler_->setPlan(path);  // replaces pruned path and resets projection/carrot search
+  adopted_stamp_ns_ = stamp;
+  std_msgs::msg::Float64MultiArray msg;
+  msg.data = {clock_->now().seconds(), static_cast<double>(path.header.stamp.sec),
+    static_cast<double>(path.header.stamp.nanosec), ecpp_params_.omega_n,
+    path.poses.front().pose.position.x, path.poses.front().pose.position.y};
+  adoption_pub_->publish(msg);
 }
 
 void ErrorCompensatedPurePursuitController::deactivate()
 {
   RegulatedPurePursuitController::deactivate();
   ecpp_debug_pub_->on_deactivate();
+  command_initialized_ = false;
 }
 
 void ErrorCompensatedPurePursuitController::cleanup()
@@ -568,11 +681,13 @@ void ErrorCompensatedPurePursuitController::cleanup()
   RegulatedPurePursuitController::cleanup();
   ecpp_path_handler_.reset();
   ecpp_debug_pub_.reset();
+  adoption_pub_.reset();
 }
 
 void ErrorCompensatedPurePursuitController::reset()
 {
   std::lock_guard<std::mutex> lock_reinit(param_handler_->getMutex());
+  command_initialized_ = false;
   cancelling_ = false;
   finished_cancelling_ = false;
   has_reached_xy_tolerance_ = false;

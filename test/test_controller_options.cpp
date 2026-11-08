@@ -570,3 +570,48 @@ TEST(ControllerOptions, GainSourcesSwitchAtomicallyAndDifferWhenRequestedSpeedIs
   EXPECT_EQ(harness.controller->gainSource(), "measured");
   cleanup(harness);
 }
+
+TEST(ControllerOptions, JazzyWindowPreservesAccelerationAcrossPathReplacement)
+{
+  rclcpp::NodeOptions options;
+  options.parameter_overrides({
+    rclcpp::Parameter("FollowPath.use_dynamic_window", true),
+    rclcpp::Parameter("FollowPath.ecpp.v_gain_source", "nominal"),
+    rclcpp::Parameter("FollowPath.ecpp.omega_n", 2.2)});
+  auto h = makeController("jazzy_window", "always_on", false, options);
+  geometry_msgs::msg::Twist previous;
+  for (int i = 0; i < 100; ++i) {
+    // computeCommand replaces the plan on every cycle, exercising preservation.
+    const auto cmd = computeCommand(h).twist;
+    EXPECT_LE(std::abs(cmd.linear.x), 0.5 + 1e-12);
+    EXPECT_LE(std::abs(cmd.angular.z), 1.0 + 1e-12);
+    EXPECT_LE(std::abs(cmd.linear.x - previous.linear.x), 0.5 / 20.0 + 1e-12);
+    EXPECT_LE(std::abs(cmd.angular.z - previous.angular.z), 1.5 / 20.0 + 1e-12);
+    EXPECT_EQ(cmd.linear.y, 0.0);
+    previous = cmd;
+  }
+  EXPECT_GT(previous.linear.x, 0.0);
+  cleanup(h);
+}
+
+TEST(ControllerOptions, SupervisedPlanAtomicallyAdoptsPreparedGainAndRejectsReplay)
+{
+  rclcpp::NodeOptions options;
+  options.parameter_overrides({rclcpp::Parameter("FollowPath.supervised_paths", true)});
+  auto h = makeController("supervised", "always_on", false, options);
+  const auto path = makeOffsetPath(h.node->now());
+  const int64_t stamp = rclcpp::Time(path.header.stamp).nanoseconds();
+  EXPECT_THROW(h.controller->setPlan(path), nav2_core::InvalidPath);
+  EXPECT_FALSE(h.node->set_parameters_atomically({
+      rclcpp::Parameter("FollowPath.ecpp.pending_omega_n", 1.8)}).successful);
+  ASSERT_TRUE(h.node->set_parameters_atomically({
+      rclcpp::Parameter("FollowPath.ecpp.pending_path_stamp_ns", stamp),
+      rclcpp::Parameter("FollowPath.ecpp.pending_omega_n", 1.8)}).successful);
+  EXPECT_EQ(h.controller->ecppParams().omega_n, 1.0);
+  h.controller->setPlan(path);
+  EXPECT_EQ(h.controller->ecppParams().omega_n, 1.8);
+  EXPECT_THROW(h.controller->setPlan(path), nav2_core::InvalidPath);
+  EXPECT_FALSE(h.node->set_parameters_atomically({
+      rclcpp::Parameter("FollowPath.ecpp.omega_n", 2.2)}).successful);
+  cleanup(h);
+}

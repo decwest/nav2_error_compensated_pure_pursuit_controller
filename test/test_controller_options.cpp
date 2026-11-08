@@ -513,3 +513,60 @@ TEST(PublicConfigurations, RosParserLoadsEveryFileAndEcppController)
     EXPECT_EQ(ecpp_count, filename == "paper_experiment2_params.yaml" ? 3u : expected_count);
   }
 }
+
+TEST(ControllerOptions, NominalGainsRemainFixedDuringSpeedLimitsAndOdometryChanges)
+{
+  rclcpp::NodeOptions options;
+  options.parameter_overrides({
+    rclcpp::Parameter("FollowPath.ecpp.v_gain_source", "nominal"),
+    rclcpp::Parameter("FollowPath.ecpp.omega_n", 3.06)});
+  auto harness = makeController("nominal", "always_on", false, options);
+  // v0=0.5, epsilon=0.05: corrected omega=3.366 and v_gain=0.55 give Ky=37.4544.
+  constexpr double expected_curvature = -1.0 - (37.4544 - 2.0 / 0.36) * 0.2;
+  for (const double limit : {0.5, 0.25, 0.1}) {
+    harness.controller->setSpeedLimit(limit, false);
+    for (const double measured : {0.0, 0.07, 0.5}) {
+      const auto path = makeOffsetPath(harness.node->now());
+      harness.controller->setPlan(path);
+      geometry_msgs::msg::PoseStamped pose;
+      pose.header = path.header;
+      pose.pose.orientation.w = 1.0;
+      geometry_msgs::msg::Twist speed;
+      speed.linear.x = measured;
+      TestGoalChecker checker;
+      const auto command = harness.controller->computeVelocityCommands(
+        pose, speed, &checker);
+      EXPECT_NEAR(command.twist.linear.x, limit, 1e-12);
+      EXPECT_NEAR(command.twist.angular.z / limit, expected_curvature, 1e-10);
+    }
+  }
+  // Changing the configured nominal speed retunes the fixed gains.
+  harness.controller->setSpeedLimit(nav2_costmap_2d::NO_SPEED_LIMIT, false);
+  ASSERT_TRUE(harness.node->set_parameters_atomically(
+      {rclcpp::Parameter("FollowPath.desired_linear_vel", 0.8)}).successful);
+  const auto retuned = computeCommand(harness);
+  EXPECT_NEAR(retuned.twist.angular.z / retuned.twist.linear.x,
+    -1.0 - (std::pow(3.06 / 0.8, 2) - 2.0 / 0.36) * 0.2, 1e-10);
+  cleanup(harness);
+}
+
+TEST(ControllerOptions, GainSourcesSwitchAtomicallyAndDifferWhenRequestedSpeedIsLimited)
+{
+  auto harness = makeController("gain_sources", "always_on");
+  harness.controller->setSpeedLimit(0.25, false);
+  const std::string parameter = "FollowPath.ecpp.v_gain_source";
+  const std::vector<std::pair<std::string, double>> sources = {
+    {"nominal", 0.55}, {"commanded", 0.30}, {"measured", 0.05}};
+  for (const auto & [source, gain_speed] : sources) {
+    ASSERT_TRUE(harness.node->set_parameters_atomically(
+        {rclcpp::Parameter(parameter, source)}).successful);
+    const auto command = computeCommand(harness);
+    const double ky = std::pow(1.1 / gain_speed, 2);
+    EXPECT_NEAR(command.twist.angular.z,
+      0.25 * (-1.0 - (ky - 2.0 / 0.36) * 0.2), 1e-10);
+  }
+  ASSERT_FALSE(harness.node->set_parameters_atomically(
+      {rclcpp::Parameter(parameter, "invalid")}).successful);
+  EXPECT_EQ(harness.controller->gainSource(), "measured");
+  cleanup(harness);
+}

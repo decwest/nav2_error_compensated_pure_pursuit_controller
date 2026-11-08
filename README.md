@@ -103,3 +103,9 @@ The paper's simulation code is in [ecpp](https://github.com/decwest/ecpp). -->
 [Apache-2.0](LICENSE). The controller and path handler adapt code from
 [Nav2 Regulated Pure Pursuit](https://github.com/ros-navigation/navigation2/tree/jazzy/nav2_regulated_pure_pursuit_controller);
 upstream copyright notices are retained in the derived files.
+
+### Jazzy nominal gains
+
+`ecpp.v_gain_source: nominal` fixes gain speed to `base_desired_linear_vel + v_epsilon`.
+Speed limits and measured odometry do not retune the gains. Port of Lyrical
+11b3b42; the Jazzy public parameter remains `desired_linear_vel`.

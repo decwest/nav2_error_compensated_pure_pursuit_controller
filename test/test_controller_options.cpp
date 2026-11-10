@@ -603,15 +603,42 @@ TEST(ControllerOptions, SupervisedPlanAtomicallyAdoptsPreparedGainAndRejectsRepl
   const int64_t stamp = rclcpp::Time(path.header.stamp).nanoseconds();
   EXPECT_THROW(h.controller->setPlan(path), nav2_core::InvalidPath);
   EXPECT_FALSE(h.node->set_parameters_atomically({
-      rclcpp::Parameter("FollowPath.ecpp.pending_omega_n", 1.8)}).successful);
+    rclcpp::Parameter("FollowPath.ecpp.pending_omega_n", 1.8)}).successful);
   ASSERT_TRUE(h.node->set_parameters_atomically({
-      rclcpp::Parameter("FollowPath.ecpp.pending_path_stamp_ns", stamp),
-      rclcpp::Parameter("FollowPath.ecpp.pending_omega_n", 1.8)}).successful);
+    rclcpp::Parameter("FollowPath.ecpp.pending_path_stamp_ns", stamp),
+    rclcpp::Parameter("FollowPath.ecpp.pending_omega_n", 1.8)}).successful);
   EXPECT_EQ(h.controller->ecppParams().omega_n, 1.0);
   h.controller->setPlan(path);
   EXPECT_EQ(h.controller->ecppParams().omega_n, 1.8);
   EXPECT_THROW(h.controller->setPlan(path), nav2_core::InvalidPath);
   EXPECT_FALSE(h.node->set_parameters_atomically({
-      rclcpp::Parameter("FollowPath.ecpp.omega_n", 2.2)}).successful);
+    rclcpp::Parameter("FollowPath.ecpp.omega_n", 2.2)}).successful);
   cleanup(h);
+}
+
+TEST(ControllerOptions, PredictionDefaultsPreserveConstantVelocityAndDisableVisualization)
+{
+  auto h = makeController("prediction_defaults");
+  EXPECT_EQ(h.node->get_parameter("FollowPath.collision_prediction_mode").as_string(),
+    "constant_velocity");
+  EXPECT_FALSE(h.node->get_parameter("FollowPath.publish_collision_prediction").as_bool());
+  EXPECT_DOUBLE_EQ(h.node->get_parameter("FollowPath.collision_prediction_time_buffer").as_double(),
+    2.0);
+  cleanup(h);
+}
+
+TEST(ControllerOptions, InvalidPredictionConfigurationIsRejected)
+{
+  for (const auto & parameter : {
+    rclcpp::Parameter("FollowPath.collision_prediction_mode", "typo"),
+    rclcpp::Parameter("FollowPath.collision_prediction_time_buffer", -0.1),
+    rclcpp::Parameter("FollowPath.collision_stop_margin", -0.1),
+    rclcpp::Parameter("FollowPath.collision_prediction_max_steps", 0),
+    rclcpp::Parameter("FollowPath.collision_prediction_mode", "closed_loop")})
+  {
+    rclcpp::NodeOptions options;
+    options.parameter_overrides({parameter});
+    EXPECT_THROW(makeController("invalid_prediction", "ey_only", false, options),
+      nav2_core::ControllerException);
+  }
 }

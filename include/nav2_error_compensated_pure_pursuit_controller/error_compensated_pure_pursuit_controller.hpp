@@ -19,10 +19,13 @@
 #pragma once
 
 #include <memory>
+#include <limits>
 #include <cstdint>
-#include "nav2_dynamic_window_pure_pursuit_controller/dynamic_window_pure_pursuit_controller.hpp"
 #include <string>
 #include <vector>
+
+#include "diagnostic_msgs/msg/diagnostic_array.hpp"
+#include "nav2_dynamic_window_pure_pursuit_controller/dynamic_window_pure_pursuit_controller.hpp"
 
 #include "nav2_regulated_pure_pursuit_controller/regulated_pure_pursuit_controller.hpp"
 #include "nav2_core/controller_exceptions.hpp"
@@ -77,6 +80,73 @@ protected:
     const std::vector<rclcpp::Parameter> & parameters);
 
   void updateParameters(const std::vector<rclcpp::Parameter> & parameters);
+
+  using WindowBounds = nav2_dynamic_window_pure_pursuit_controller::
+    DynamicWindowPurePursuitController::DynamicWindowBounds;
+  struct ControlState
+  {
+    geometry_msgs::msg::Twist previous;
+    bool reached_xy{false};
+    bool finished_cancelling{false};
+  };
+  struct ControlStep
+  {
+    geometry_msgs::msg::Twist command;
+    WindowBounds bounds;
+    ControlState state;
+    geometry_msgs::msg::PoseStamped carrot, curvature_carrot;
+    ecpp_math::EcppTerms terms;
+    bool rotating{false};
+  };
+  struct PredictionContext
+  {
+    geometry_msgs::msg::PoseStamped start;
+    nav_msgs::msg::Path plan;
+    double radius{0.0}, horizon{0.0};
+  };
+  struct PredictionResult
+  {
+    nav_msgs::msg::Path path;
+    std::vector<geometry_msgs::msg::PoseStamped> control_poses;
+    std::vector<geometry_msgs::msg::Twist> commands;
+    geometry_msgs::msg::Twist first_command;
+    std::string event{"clear"};
+    double distance{0.0}, event_distance{0.0}, first_scale{1.0};
+    size_t steps{0};
+  };
+  ControlStep computeControlStep(
+    const PathHandler::TransformedPlan & transformed,
+    const geometry_msgs::msg::Twist & speed, double pose_cost, ControlState state);
+  PredictionContext makePredictionContext(
+    const geometry_msgs::msg::PoseStamped & pose,
+    const geometry_msgs::msg::Twist & feedback, const geometry_msgs::msg::Twist & measured);
+  PathHandler::TransformedPlan predictionLocalPlan(
+    nav_msgs::msg::Path & plan, const geometry_msgs::msg::PoseStamped & pose) const;
+  PredictionResult predictTracking(
+    const PredictionContext & context, const ControlStep & first,
+    double stop_budget = std::numeric_limits<double>::infinity());
+  geometry_msgs::msg::Twist limitPredictedCollision(
+    const PredictionContext & context, const ControlStep & first);
+  std::string predictionPoseStatus(const geometry_msgs::msg::PoseStamped & pose);
+  double stoppingTime(const geometry_msgs::msg::Twist & command) const;
+  static double sweptSpeed(const geometry_msgs::msg::Twist & command, double radius);
+  double stoppingDistance(const geometry_msgs::msg::Twist & command, double radius) const;
+  double brakingScale(
+    const geometry_msgs::msg::Twist & command, double radius, double available) const;
+  double predictionHorizon(
+    const geometry_msgs::msg::Twist & feedback, const geometry_msgs::msg::Twist & measured) const;
+  void publishPredictionDiagnostics(
+    const PredictionContext & context, const ControlStep & first,
+    const PredictionResult & nominal, const PredictionResult & checked,
+    const std::string & status, double elapsed_ms);
+  std::string collision_prediction_mode_{"constant_velocity"};
+  double collision_prediction_time_buffer_{2.0}, collision_stop_margin_{0.3};
+  int64_t collision_prediction_max_steps_{300};
+  bool publish_collision_prediction_{false};
+  rclcpp_lifecycle::LifecyclePublisher<nav_msgs::msg::Path>::SharedPtr
+    nominal_prediction_pub_, checked_prediction_pub_;
+  rclcpp_lifecycle::LifecyclePublisher<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr
+    prediction_diagnostics_pub_;
 
   // Configuration-only window limits. The upstream Jazzy DWPP helper is reused.
   nav2_dynamic_window_pure_pursuit_controller::DynamicWindowPurePursuitController window_;

@@ -12,6 +12,7 @@ find_package(nav2_regulated_pure_pursuit_controller REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rcl_interfaces REQUIRED)
 find_package(geometry_msgs REQUIRED)
+find_package(diagnostic_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(pluginlib REQUIRED)
@@ -30,6 +31,7 @@ set(dependencies
   rclcpp
   rcl_interfaces
   geometry_msgs
+  diagnostic_msgs
   nav2_costmap_2d
   pluginlib
   nav_msgs
@@ -47,6 +49,7 @@ set(library_name nav2_error_compensated_pure_pursuit_controller)
 add_library(${library_name} SHARED
   src/error_compensated_pure_pursuit_controller.cpp
   src/path_handler.cpp
+  src/collision_prediction.cpp
 )
 
 ament_target_dependencies(${library_name}
@@ -112,6 +115,12 @@ if(BUILD_TESTING)
     target_link_libraries(test_controller_options
       ${library_name}
     )
+  endif()
+
+  ament_add_gtest(test_prediction test/test_prediction.cpp)
+  if(TARGET test_prediction)
+    ament_target_dependencies(test_prediction ${dependencies})
+    target_link_libraries(test_prediction ${library_name})
   endif()
 
   ament_add_gtest(test_path_handler

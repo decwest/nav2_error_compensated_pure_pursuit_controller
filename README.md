@@ -128,3 +128,44 @@ projection/search path, and adopts the gain in the same critical section.
 `/testbed/path_adopted` is Float64MultiArray containing adoption ROS seconds,
 path stamp seconds, path stamp nanoseconds, omega_n, first x, first y.
 Action acceptance is not a substitute for this notification.
+
+### Optional closed-loop collision prediction (Jazzy EC-DWPP)
+
+`collision_prediction_mode` defaults to `constant_velocity`, preserving the RPP
+constant-command collision check. Select `closed_loop` together with
+`use_dynamic_window: true` to predict differential-drive tracking with this
+plugin's own arc-length carrot, ECPP gains, speed regulation and DWPP window.
+Configuration is read-only after configure; restart the controller to switch.
+
+| Parameter | Default | Meaning |
+| --- | --- | --- |
+| `collision_prediction_mode` | `constant_velocity` | `constant_velocity` or `closed_loop` |
+| `collision_prediction_time_buffer` | `2.0` s | Extra time beyond the maximum stopping time |
+| `collision_stop_margin` | `0.3` m | Footprint-sweep distance reserved before first contact |
+| `collision_prediction_max_steps` | `300` | Maximum control steps per rollout; insufficient budget rejects control |
+| `publish_collision_prediction` | `false` | Publish nominal/verified paths and prediction diagnostics |
+
+The horizon is `max(dt, max(v_max/a_max, w_max/alpha_max,
+stop_time(previous_command), stop_time(measured_velocity)) + time_buffer)`.
+With 0.5 m/s, 0.5 m/s², 1.0 rad/s and 1.5 rad/s², it is 3 s (90 steps at
+30 Hz), independent of carrot distance. The full footprint is checked at
+substeps of at most half a costmap cell of translation plus rotational sweep.
+The local costmap is held fixed during prediction; leaving its verified extent
+is treated as a stopping boundary.
+
+On predicted contact, a second rollout reserves `collision_stop_margin` and
+applies common-ratio braking within the reachable DWPP window. Its stopping
+envelope includes one control period of command holding. The altered trajectory
+is checked again; insufficient braking distance, exhausted step budget or failed
+prediction throws `nav2_core::NoValidControl`. This follows the EC-DWVP predictor,
+with lateral velocity fixed to zero and ECPP's continuous segment projection.
+The prediction uses copies of the plan and controller progress/command state.
+
+When visualization is enabled, `<plugin>/nominal_collision_arc` and
+`<plugin>/collision_arc` contain the predicted and verified paths in the costmap
+frame. `<plugin>/collision_prediction` reports events, horizon, step counts,
+braking distance, speed scale and prediction compute time in milliseconds.
+Compute time in this diagnostic excludes context transformation and publishing;
+measure the complete `computeVelocityCommands` call for control-period budgeting.
+A static snapshot and ideal command following do not model actuator lag or the
+future motion of obstacles; downstream collision monitoring remains necessary.

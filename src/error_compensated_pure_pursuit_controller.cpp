@@ -240,11 +240,17 @@ void ErrorCompensatedPurePursuitController::configure(
 
   rcl_interfaces::msg::ParameterDescriptor fixed;
   fixed.read_only = true;
+  const auto fixed_parameter = [&](const std::string & key, auto value) {
+      const auto parameter_name = name + "." + key;
+      declare_parameter_if_not_declared(
+        node.get(), parameter_name, rclcpp::ParameterValue(value), fixed);
+      return node->get_parameter(parameter_name).get_value<decltype(value)>();
+    };
   const auto fixed_bool = [&](const std::string & key, bool value) {
-      return node->declare_parameter<bool>(name + "." + key, value, fixed);
+      return fixed_parameter(key, value);
     };
   const auto fixed_double = [&](const std::string & key, double value) {
-      const auto result = node->declare_parameter<double>(name + "." + key, value, fixed);
+      const auto result = fixed_parameter(key, value);
       if (!std::isfinite(result) || result <= 0.0) {
         throw nav2_core::ControllerException(key + " must be finite and positive");
       }
@@ -256,14 +262,11 @@ void ErrorCompensatedPurePursuitController::configure(
   window_w_ = fixed_double("dwpp.max_angular_vel", 1.0);
   window_a_ = fixed_double("dwpp.max_linear_accel", 0.5);
   window_alpha_ = fixed_double("dwpp.max_angular_accel", 1.5);
-  collision_prediction_mode_ = node->declare_parameter<std::string>(
-    name + ".collision_prediction_mode", "constant_velocity", fixed);
-  collision_prediction_time_buffer_ = node->declare_parameter<double>(
-    name + ".collision_prediction_time_buffer", 2.0, fixed);
-  collision_stop_margin_ = node->declare_parameter<double>(
-    name + ".collision_stop_margin", 0.3, fixed);
-  collision_prediction_max_steps_ = node->declare_parameter<int64_t>(
-    name + ".collision_prediction_max_steps", 300, fixed);
+  collision_prediction_mode_ = fixed_parameter(
+    "collision_prediction_mode", std::string("constant_velocity"));
+  collision_prediction_time_buffer_ = fixed_parameter("collision_prediction_time_buffer", 2.0);
+  collision_stop_margin_ = fixed_parameter("collision_stop_margin", 0.3);
+  collision_prediction_max_steps_ = fixed_parameter("collision_prediction_max_steps", int64_t{300});
   publish_collision_prediction_ = fixed_bool("publish_collision_prediction", false);
   if ((collision_prediction_mode_ != "constant_velocity" &&
     collision_prediction_mode_ != "closed_loop") ||
@@ -277,8 +280,16 @@ void ErrorCompensatedPurePursuitController::configure(
     throw nav2_core::ControllerException(
             "closed_loop requires use_dynamic_window for braking limits");
   }
-  node->declare_parameter<int64_t>(name + ".ecpp.pending_path_stamp_ns", 0);
-  node->declare_parameter<double>(name + ".ecpp.pending_omega_n", 1.0);
+  declare_parameter_if_not_declared(
+    node.get(), name + ".ecpp.pending_path_stamp_ns", rclcpp::ParameterValue(int64_t{0}));
+  declare_parameter_if_not_declared(
+    node.get(), name + ".ecpp.pending_omega_n", rclcpp::ParameterValue(1.0));
+  // Cleanup invalidates prepared paths, even when ControllerServer creates a new plugin
+  // instance on the same node. Retain the replay boundary, but require a fresh preparation.
+  adopted_stamp_ns_ = std::max(
+    adopted_stamp_ns_, node->get_parameter(name + ".ecpp.pending_path_stamp_ns").as_int());
+  pending_stamp_ns_ = 0;
+  command_initialized_ = false;
   adoption_pub_ = node->create_publisher<std_msgs::msg::Float64MultiArray>(
     "/testbed/path_adopted", rclcpp::QoS(20).reliable());
 
@@ -353,15 +364,19 @@ void ErrorCompensatedPurePursuitController::configure(
     "curvature_lookahead_point", 1);
   is_rotating_to_heading_pub_ = node->create_publisher<std_msgs::msg::Bool>(
     "is_rotating_to_heading", 1);
+  // Shim controllers qualify parameter names with dots. ROS topic tokens cannot
+  // contain dots; use a topic namespace without changing the parameter prefix.
+  std::string topic_prefix = plugin_name_;
+  std::replace(topic_prefix.begin(), topic_prefix.end(), '.', '/');
   ecpp_debug_pub_ = node->create_publisher<std_msgs::msg::Float64MultiArray>(
-    plugin_name_ + "/ecpp_debug", 1);
+    topic_prefix + "/ecpp_debug", 1);
 
   nominal_prediction_pub_ = node->create_publisher<nav_msgs::msg::Path>(
-    plugin_name_ + "/nominal_collision_arc", 1);
+    topic_prefix + "/nominal_collision_arc", 1);
   checked_prediction_pub_ = node->create_publisher<nav_msgs::msg::Path>(
-    plugin_name_ + "/collision_arc", 1);
+    topic_prefix + "/collision_arc", 1);
   prediction_diagnostics_pub_ = node->create_publisher<diagnostic_msgs::msg::DiagnosticArray>(
-    plugin_name_ + "/collision_prediction", 10);
+    topic_prefix + "/collision_prediction", 10);
 
   parameter_validation_handler_ = node->add_on_set_parameters_callback(
     std::bind(

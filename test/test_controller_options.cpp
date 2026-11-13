@@ -88,6 +88,11 @@ public:
   double limitedSpeed() const {return params_->desired_linear_vel;}
   bool publishesDebug() const {return ecpp_publish_debug_;}
   size_t debugSubscribers() const {return ecpp_debug_pub_->get_subscription_count();}
+  std::vector<std::string> diagnosticTopics() const
+  {
+    return {ecpp_debug_pub_->get_topic_name(), nominal_prediction_pub_->get_topic_name(),
+      checked_prediction_pub_->get_topic_name(), prediction_diagnostics_pub_->get_topic_name()};
+  }
 };
 
 struct ControllerHarness
@@ -102,12 +107,11 @@ ControllerHarness makeController(
   const std::string & suffix,
   const std::string & gate_mode = "ey_only",
   const bool reject_parameter_updates = false,
-  const rclcpp::NodeOptions & options = rclcpp::NodeOptions())
+  const rclcpp::NodeOptions & options = rclcpp::NodeOptions(),
+  const std::string & plugin_name = "FollowPath")
 {
   auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>(
     "ecpp_test_" + suffix, options);
-  const std::string plugin_name = "FollowPath";
-
   node->declare_parameter("controller_frequency", 20.0);
   node->declare_parameter(plugin_name + ".use_rotate_to_heading", false);
   node->declare_parameter(plugin_name + ".use_collision_detection", false);
@@ -514,6 +518,29 @@ TEST(PublicConfigurations, RosParserLoadsEveryFileAndEcppController)
   }
 }
 
+TEST(ControllerOptions, NestedPluginNamesUseTopicNamespacesAndKeepParameterPrefix)
+{
+  rclcpp::NodeOptions options;
+  options.parameter_overrides({
+    {"FollowPath.primary_controller.ecpp.v_gain_source", "nominal"},
+    {"FollowPath.primary_controller.ecpp.publish_debug", true}});
+  auto harness = makeController(
+    "nested", "ey_only", false, options, "FollowPath.primary_controller");
+  const std::vector<std::string> expected{
+    "/FollowPath/primary_controller/ecpp_debug",
+    "/FollowPath/primary_controller/nominal_collision_arc",
+    "/FollowPath/primary_controller/collision_arc",
+    "/FollowPath/primary_controller/collision_prediction"};
+  EXPECT_EQ(harness.controller->diagnosticTopics(), expected);
+  EXPECT_EQ(harness.controller->gainSource(), "nominal");
+  EXPECT_TRUE(harness.controller->publishesDebug());
+  const auto result = harness.node->set_parameters_atomically({
+    {"FollowPath.primary_controller.ecpp.omega_n", 2.0}});
+  EXPECT_TRUE(result.successful) << result.reason;
+  EXPECT_DOUBLE_EQ(harness.controller->ecppParams().omega_n, 2.0);
+  cleanup(harness);
+}
+
 TEST(ControllerOptions, NominalGainsRemainFixedDuringSpeedLimitsAndOdometryChanges)
 {
   rclcpp::NodeOptions options;
@@ -624,6 +651,43 @@ TEST(ControllerOptions, PredictionDefaultsPreserveConstantVelocityAndDisableVisu
   EXPECT_FALSE(h.node->get_parameter("FollowPath.publish_collision_prediction").as_bool());
   EXPECT_DOUBLE_EQ(h.node->get_parameter("FollowPath.collision_prediction_time_buffer").as_double(),
     2.0);
+  cleanup(h);
+}
+
+TEST(ControllerOptions, ReconfigurePreservesLimitsAndRequiresFreshSupervisedPreparation)
+{
+  rclcpp::NodeOptions options;
+  options.parameter_overrides({
+    rclcpp::Parameter("FollowPath.supervised_paths", true),
+    rclcpp::Parameter("FollowPath.use_dynamic_window", true),
+    rclcpp::Parameter("FollowPath.dwpp.max_angular_vel", 0.7)});
+  auto h = makeController("reconfigure", "ey_only", false, options);
+  auto path = makeOffsetPath(h.node->now());
+  auto stamp = rclcpp::Time(path.header.stamp).nanoseconds();
+  for (bool replace_instance : {false, true}) {
+    ASSERT_TRUE(h.node->set_parameters_atomically({
+      rclcpp::Parameter("FollowPath.ecpp.pending_path_stamp_ns", stamp),
+      rclcpp::Parameter("FollowPath.ecpp.pending_omega_n", 1.5)}).successful);
+    h.controller->setPlan(path);
+    h.controller->cleanup();
+    if (replace_instance) {
+      h.controller = std::make_shared<TestController>();
+    }
+    auto tf = std::make_shared<tf2_ros::Buffer>(h.node->get_clock());
+    ASSERT_NO_THROW(h.controller->configure(h.node, "FollowPath", tf, h.costmap));
+    EXPECT_DOUBLE_EQ(h.node->get_parameter("FollowPath.dwpp.max_angular_vel").as_double(), 0.7);
+    EXPECT_TRUE(h.node->describe_parameter("FollowPath.dwpp.max_angular_vel").read_only);
+    EXPECT_THROW(h.controller->setPlan(path), nav2_core::InvalidPath);
+    EXPECT_FALSE(h.node->set_parameters_atomically({
+      rclcpp::Parameter("FollowPath.ecpp.pending_path_stamp_ns", stamp),
+      rclcpp::Parameter("FollowPath.ecpp.pending_omega_n", 1.5)}).successful);
+    ++stamp;
+    path.header.stamp = rclcpp::Time(stamp);
+  }
+  ASSERT_TRUE(h.node->set_parameters_atomically({
+    rclcpp::Parameter("FollowPath.ecpp.pending_path_stamp_ns", stamp),
+    rclcpp::Parameter("FollowPath.ecpp.pending_omega_n", 1.5)}).successful);
+  EXPECT_NO_THROW(h.controller->setPlan(path));
   cleanup(h);
 }
 

@@ -70,6 +70,130 @@ Other parameters are inherited from RPP.
 - During reverse motion, the controller uses PP without error compensation.
 
 
+## Choosing `ecpp.omega_n`
+
+Use two design guidelines together:
+
+1. **Angular-velocity constraint.** The paper's reference design value is
+   $$\omega_{n,\mathrm{ref}} = \sqrt{\frac{v\,\bar\omega}{\sqrt{\varepsilon_{\mathrm{off}}}\,L_d}},
+   \qquad \bar\omega = \omega_{\max} - v|\kappa_{\mathrm{prev}}| > 0.$$
+   Here `v` is forward speed, `L_d` is lookahead distance,
+   `epsilon_off` is `ecpp.gate_error_off`, and `kappa_prev` is preview curvature.
+   This estimates a reference value using the lateral error at the gate's OFF
+   threshold. It neglects the heading-error contribution and is not a guarantee
+   that the complete command will avoid saturation.
+2. **Measured response.** Identify the command-to-motion response and choose a
+   frequency with at least **30 degrees of phase margin**, allowing additional
+   margin for uncertainty and changing loads. This is a practical local tuning
+   guideline, separate from the paper's results. It does not establish global
+   stability, collision avoidance, or safe physical stopping.
+
+The standalone tools in [`tools/response_id/`](tools/response_id/) are run from
+this checkout and are not installed or linked into the plugin. CSV fitting
+requires NumPy: `python3 -m pip install -r tools/response_id/requirements.txt`.
+Bag reading additionally needs `python3 -m pip install rosbags`; plotting needs
+`matplotlib`. Both analysis tools run without ROS. Live excitation requires a
+sourced ROS 2 environment, `rclpy`, the standard geometry messages, and `ros2 bag`
+when recording.
+
+**These commands move the robot open loop.** First use `--dry-run` on the
+excitation command to export its complete `t,v,w` command sequence to stdout.
+The space estimate on stderr integrates the ideal unicycle motion and inflates
+its bounds by the supplied circumscribed footprint radius and clearance.
+Reserve additional space for measured lag, stopping distance and tracking error;
+the estimate cannot establish a safe area for an unmeasured robot. Clear people
+and obstacles from the whole swept area, start from rest, and keep an operator
+at the physical emergency stop. Ctrl-C or SIGTERM requests zero commands for
+one second; normal completion ramps to zero and also sends the zero burst.
+An emergency zero command can exceed the normal acceleration ramp. Loss of the
+process, communications or power requires an independent watchdog/physical stop.
+
+Use a dedicated input upstream of the velocity smoother and collision monitor.
+Remove or remap all other publishers on that input, including idle publishers;
+canceling a navigation goal alone is insufficient. The tool checks publisher
+endpoints during discovery, countdown and motion, and aborts on a conflict.
+This ROS graph check is not an atomic command-ownership lock. Keep the downstream
+safety chain active and include its final command and odometry in the recording.
+The wall-time limit includes startup and the final zero burst; recorder flushing
+has a separate bounded timeout. All unused velocity components, including
+lateral velocity, are zero.
+
+The following **example values and topic names are illustrative**; replace them
+with the verified limits, footprint and routing for the robot. Run these three
+commands from the repository root, using new recording/output directories:
+
+```bash
+python3 tools/response_id/excite.py --topic /response_id/cmd_vel --message-type Twist \
+  --mode drive --speed 0.2 --amplitude 0.2 --linear-accel 0.3 --angular-accel 0.5 \
+  --period 0.05 --footprint-radius 0.35 --clearance 0.3 --max-duration 45 \
+  --record response_run --record-topics /response_id/cmd_vel /base/cmd_vel /odom
+python3 tools/response_id/fit.py response_run --command-topic /response_id/cmd_vel \
+  --body-command-topic /base/cmd_vel --odom-topic /odom --output response_fit
+python3 tools/response_id/omega_n_limit.py --model response_fit/model.json \
+  --control-period 0.05 --zeta 1 --phase-margin 30 --omega-n 1.5 --speed 0.2
+```
+
+`--mode` also accepts `spin` (zero forward speed), `straight` (forward speed
+steps, zero yaw amplitude), and `sine` (small cosine with a gradual envelope).
+Use `--hold`, `--rest`, `--repeats`, or sine `--frequency`/`--cycles` to adjust
+excitation. The tool validates the sine's envelope as well as its sinusoidal
+angular acceleration. Use `--message-type TwistStamped` when the input requires
+stamped commands; `--frame-id` sets their frame. Motion values, acceleration
+limits and command period have no robot-specific defaults.
+
+For CSV input, use columns `t,v_command,w_command,v_odom,w_odom` and optionally
+`v_body_command,w_body_command` (seconds, m/s, rad/s). The older names `v_nav`,
+`w_nav`, `v_fin`, `w_fin` are accepted as aliases. Column names select the signals
+for CSV input; the topic options select signals only for bags. Supply multiple
+input files to aggregate repeated trials. Keep load, speed, floor and other
+conditions consistent within one fit. The fitter uses bag receipt timestamps,
+a 5 ms sampling grid, held commands, and linearly interpolated odometry.
+Already uniform CSV series are preserved, including small timestamp rounding.
+
+The first-order-plus-dead-time model is `G_a(s) = K exp(-L s)/(T s + 1)`.
+Each trial uses backward-Euler simulation and a least-squares positive gain,
+with a 10 ms grid for `L` and `T`; repeated trials use median `K`, `T` and `L+T`.
+Change `--dt`, `--time-step`, `--max-delay` and `--max-time-constant` as needed;
+an optimum at the upper search bounds is reported. Include rest before motion:
+the initial model state assumes a steady initial input, with no fitted offset.
+The JSON and terminal table contain `K`, `L`, `T` and R² for both forward and
+yaw response; a constant/unexcited axis is reported as unavailable.
+`series_*.csv` includes the measured signals and fitted predictions; `--plot`
+adds `fit.png`. Inspect these before relying on the result.
+
+With a body-command topic, the recommended model combines its fitted body
+response with the median command-to-body delay from cross-correlation, assuming
+a unit-gain, pure-delay pipeline. Inspect the separate overall fit if smoothing,
+clipping or a safety stop changes the waveform. Without that topic, the tool
+fits command to odometry in one stage. Fit JSON excludes sampling delay.
+The limit calculator adds half the specified **controller** period exactly once
+and evaluates the same local loop for either input method:
+
+$$\mathcal{L}(s) = G_a(s)\,\frac{\omega_n(2\zeta s + \omega_n)}{s^2}.$$
+
+It reports the limit, the candidate's crossover and phase margin, and the
+corresponding Pure Pursuit lookahead `sqrt(2) * v / omega_n`. This lookahead is
+an equivalent response scale, not an instruction to change ECPP's preview
+lookahead. Explicit `--gain`, `--delay` and `--time-constant` may replace JSON;
+`--delay` must exclude half the controller period. An ideal delay-free model can
+have an unbounded limit; an unattainable target returns a zero limit.
+
+For example, repeated identification runs on **one electric wheelchair** at
+0.5 m/s gave the following reported values (30 Hz controller, `zeta = 1`,
+pipeline delay approximately 0.0375 s):
+
+| Load | Body K | Body L [s] | Body T [s] | Limit for 30° [rad/s] | Margin at 2.0 rad/s |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Unoccupied, two runs | 0.930 | 0.030 | 0.065 | 2.91 (individual runs 2.78–3.06) | 43° |
+| Occupied, two runs | 0.828 | 0.000 | 0.175 | 2.33 | 35° |
+
+These are reference measurements, not defaults for another platform. The loaded
+response is slower. The compatible backward-Euler fit gives approximately
+`K = 0.827, T = 0.170 s` for the occupied recordings and reproduces the reported
+limit within 0.1 rad/s; fitted `L` and `T` can trade off. Identify both expected
+load conditions and choose using the slower response and the lowest observed
+limit. Recheck the response at the intended operating speed.
+
 ## Testing
 
 After building, run these commands from the workspace root:

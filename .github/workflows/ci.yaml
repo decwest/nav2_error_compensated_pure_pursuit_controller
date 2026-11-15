@@ -23,3 +23,13 @@ jobs:
           package-name: nav2_error_compensated_pure_pursuit_controller
           target-ros2-distro: jazzy
           import-token: ${{ secrets.GITHUB_TOKEN }}
+
+  response-identification:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r tools/response_id/requirements.txt pytest rosbags
+      - run: python -m pytest -q tools/response_id/tests

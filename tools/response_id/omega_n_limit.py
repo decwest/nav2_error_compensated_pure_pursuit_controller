@@ -29,7 +29,8 @@ def validate_model(K, L, T, zeta=1.0, control_period=0.0):
 
 
 def margins(omega_n, K, L, T, zeta=1.0, control_period=0.0):
-    """Return crossover [rad/s] and unwrapped phase margin [degrees].
+    """
+    Return crossover [rad/s] and unwrapped phase margin [degrees].
 
     L excludes sampling delay. Half the control period is added exactly once.
     The dimensionless crossover x = frequency / omega_n has monotone magnitude.
@@ -39,8 +40,12 @@ def margins(omega_n, K, L, T, zeta=1.0, control_period=0.0):
         raise ValueError('omega_n must be finite and positive')
 
     def log_magnitude(x):
-        return (math.log(K) + math.log(math.hypot(1.0, 2 * zeta * x))
-                - 2 * math.log(x) - math.log(math.hypot(1.0, T * omega_n * x)))
+        return (
+            math.log(K)
+            + math.log(math.hypot(1.0, 2 * zeta * x))
+            - 2 * math.log(x)
+            - math.log(math.hypot(1.0, T * omega_n * x))
+        )
 
     lo = hi = 1.0
     while log_magnitude(lo) < 0:
@@ -55,8 +60,7 @@ def margins(omega_n, K, L, T, zeta=1.0, control_period=0.0):
             hi = mid
     x = math.sqrt(lo * hi)
     wc = x * omega_n
-    pm = math.degrees(math.atan(2 * zeta * x) - math.atan(T * wc)
-                      - (L + control_period / 2) * wc)
+    pm = math.degrees(math.atan(2 * zeta * x) - math.atan(T * wc) - (L + control_period / 2) * wc)
     return wc, pm
 
 
@@ -93,13 +97,21 @@ def main(argv=None):
     parser.add_argument('--model', type=Path, help='JSON written by fit.py')
     parser.add_argument('--axis', choices=('angular', 'linear'), default='angular')
     parser.add_argument('--gain', type=float)
-    parser.add_argument('--delay', type=float, help='dead time [s], excluding half a control period')
+    parser.add_argument(
+        '--delay', type=float, help='dead time [s], excluding half a control period'
+    )
     parser.add_argument('--time-constant', type=float)
-    parser.add_argument('--control-period', type=float, required=True, help='controller period [s]')
+    parser.add_argument(
+        '--control-period', type=float, required=True, help='controller period [s]'
+    )
     parser.add_argument('--zeta', type=float, default=1.0)
     parser.add_argument('--phase-margin', type=float, default=30.0)
-    parser.add_argument('--omega-n', type=float, required=True, help='candidate natural frequency [rad/s]')
-    parser.add_argument('--speed', type=float, required=True, help='forward speed for PP lookahead [m/s]')
+    parser.add_argument(
+        '--omega-n', type=float, required=True, help='candidate natural frequency [rad/s]'
+    )
+    parser.add_argument(
+        '--speed', type=float, required=True, help='forward speed for PP lookahead [m/s]'
+    )
     args = parser.parse_args(argv)
     try:
         explicit = (args.gain, args.delay, args.time_constant)
@@ -122,11 +134,18 @@ def main(argv=None):
     except (ValueError, OSError, KeyError, TypeError) as exc:
         parser.error(str(exc))
     print(f'Model: K={K:.6g}, L={L:.6g} s, T={T:.6g} s')
-    print(f'Effective dead time: {L + args.control_period / 2:.6g} s (includes half a control period)')
+    print(
+        f'Effective dead time: {L + args.control_period / 2:.6g} s '
+        '(includes half a control period)'
+    )
     print(f'omega_n limit at {args.phase_margin:g} deg: {cap:.6g} rad/s')
     print(f'Candidate {args.omega_n:g} rad/s: phase margin {pm:.3f} deg; crossover {wc:.6g} rad/s')
     print(f'Equivalent PP lookahead: {math.sqrt(2) * args.speed / args.omega_n:.6g} m')
-    print('Candidate meets target.' if pm >= args.phase_margin else 'Candidate is below the target phase margin.')
+    print(
+        'Candidate meets target.'
+        if pm >= args.phase_margin
+        else 'Candidate is below the target phase margin.'
+    )
     return 0
 
 

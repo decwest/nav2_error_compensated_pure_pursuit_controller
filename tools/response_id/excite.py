@@ -13,7 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Generate bounded open-loop velocity commands, optionally publish and record them.
+"""
+Generate bounded open-loop velocity commands, optionally publish and record them.
 
 All robot-specific command values, limits and topics are explicit arguments.
 --dry-run writes t,v,w CSV to stdout without importing ROS; estimates go to stderr.
@@ -36,12 +37,23 @@ STOP_SECONDS = 1.0
 
 
 def validate(args):
-    positive = ('linear_accel', 'angular_accel', 'period', 'hold', 'rest', 'max_duration', 'footprint_radius')
+    positive = (
+        'linear_accel',
+        'angular_accel',
+        'period',
+        'hold',
+        'rest',
+        'max_duration',
+        'footprint_radius',
+    )
     nonnegative = ('speed', 'amplitude', 'clearance')
     for name in positive + nonnegative:
         value = getattr(args, name)
         if not math.isfinite(value) or (value <= 0 if name in positive else value < 0):
-            raise ValueError(f'--{name.replace("_", "-")} must be finite and {"positive" if name in positive else "nonnegative"}')
+            raise ValueError(
+                f'--{name.replace("_", "-")} must be finite and '
+                f'{"positive" if name in positive else "nonnegative"}'
+            )
     if not 0.001 <= args.period <= 0.1:
         raise ValueError('--period must be between 0.001 and 0.1 seconds')
     if not math.isfinite(args.countdown) or args.countdown < 1:
@@ -84,7 +96,9 @@ def build_sequence(args):
     def append(v, w):
         t = len(samples) * dt
         if t > budget + 1e-9:
-            raise ValueError('sequence including startup, countdown and stopping exceeds --max-duration')
+            raise ValueError(
+                'sequence including startup, countdown and stopping exceeds --max-duration'
+            )
         samples.append((t, v, w))
 
     def segment(v_target, w_target, duration):
@@ -98,7 +112,11 @@ def build_sequence(args):
     if args.mode == 'spin':
         for _ in range(args.repeats):
             for direction in (1, -1):
-                segment(0.0, direction * args.amplitude, args.hold + args.amplitude / args.angular_accel)
+                segment(
+                    0.0,
+                    direction * args.amplitude,
+                    args.hold + args.amplitude / args.angular_accel,
+                )
                 segment(0.0, 0.0, args.rest + args.amplitude / args.angular_accel)
     elif args.mode == 'straight':
         for fraction in (1.0, 0.5, 1.0):
@@ -107,13 +125,20 @@ def build_sequence(args):
         segment(args.speed, 0.0, args.hold + args.speed / args.linear_accel)
         if args.mode == 'drive':
             for _ in range(args.repeats):
-                for multiplier, duration in ((1, args.hold), (-1, 2 * args.hold), (1, args.hold), (0, args.rest)):
+                for multiplier, duration in (
+                    (1, args.hold),
+                    (-1, 2 * args.hold),
+                    (1, args.hold),
+                    (0, args.rest),
+                ):
                     segment(args.speed, multiplier * args.amplitude, duration)
         else:
             duration = args.cycles / args.frequency
             for i in range(1, math.ceil(duration / dt) + 1):
                 t = min(i * dt, duration)
-                envelope = max(0.0, min(1.0, t * args.frequency / 2, (duration - t) * args.frequency))
+                envelope = max(
+                    0.0, min(1.0, t * args.frequency / 2, (duration - t) * args.frequency)
+                )
                 w = envelope * args.amplitude * math.cos(2 * math.pi * args.frequency * t)
                 append(args.speed, w)
     _, v, w = samples[-1]
@@ -123,7 +148,8 @@ def build_sequence(args):
 
 
 def motion_estimate(samples, footprint_radius, clearance):
-    """Ideal unicycle center envelope, inflated by footprint radius and clearance.
+    """
+    Ideal unicycle center envelope, inflated by footprint radius and clearance.
 
     Arc length is also reported as a heading-independent displacement bound.
     This assumes perfect command following and is not a measured stopping bound.
@@ -143,13 +169,18 @@ def motion_estimate(samples, footprint_radius, clearance):
         xs.append(x)
         ys.append(y)
     inflation = footprint_radius + clearance
-    return dict(command_duration_s=samples[-1][0], ideal_travel_m=travel,
-                ideal_x_min_m=min(xs) - inflation, ideal_x_max_m=max(xs) + inflation,
-                ideal_y_min_m=min(ys) - inflation, ideal_y_max_m=max(ys) + inflation,
-                ideal_clear_length_m=max(xs) - min(xs) + 2 * inflation,
-                ideal_clear_width_m=max(ys) - min(ys) + 2 * inflation,
-                command_based_radius_m=travel + inflation,
-                final_heading_rad=heading)
+    return {
+        'command_duration_s': samples[-1][0],
+        'ideal_travel_m': travel,
+        'ideal_x_min_m': min(xs) - inflation,
+        'ideal_x_max_m': max(xs) + inflation,
+        'ideal_y_min_m': min(ys) - inflation,
+        'ideal_y_max_m': max(ys) + inflation,
+        'ideal_clear_length_m': max(xs) - min(xs) + 2 * inflation,
+        'ideal_clear_width_m': max(ys) - min(ys) + 2 * inflation,
+        'command_based_radius_m': travel + inflation,
+        'final_heading_rad': heading,
+    }
 
 
 def run_ros(args, samples):
@@ -213,25 +244,55 @@ def run_ros(args, samples):
                 raise RuntimeError('recording destination already exists')
             args.record.parent.mkdir(parents=True, exist_ok=True)
             subscribers = publisher.get_subscription_count()
-            recorder = subprocess.Popen(['ros2', 'bag', 'record', '--storage', args.storage,
-                                         '-o', str(args.record), '--topics', *args.record_topics],
-                                        stdout=sys.stderr, stderr=sys.stderr, start_new_session=True)
+            recorder = subprocess.Popen(
+                [
+                    'ros2',
+                    'bag',
+                    'record',
+                    '--storage',
+                    args.storage,
+                    '-o',
+                    str(args.record),
+                    '--topics',
+                    *args.record_topics,
+                ],
+                stdout=sys.stderr,
+                stderr=sys.stderr,
+                start_new_session=True,
+            )
             wait_until(time.monotonic() + 3.0)
             if publisher.get_subscription_count() <= subscribers:
                 raise RuntimeError('recorder did not subscribe to the command topic in time')
         countdown_end = time.monotonic() + args.countdown
         while time.monotonic() < countdown_end:
-            print(f'Starting in {math.ceil(countdown_end - time.monotonic())} s; Ctrl-C cancels.', file=sys.stderr)
+            print(
+                f'Starting in {math.ceil(countdown_end - time.monotonic())} s; Ctrl-C cancels.',
+                file=sys.stderr,
+            )
             wait_until(min(countdown_end, time.monotonic() + 1.0))
         check()
         if publisher.get_subscription_count() == 0:
             print('No command subscribers detected.', file=sys.stderr)
         if args.record:
-            (args.record / 'excitation.json').write_text(json.dumps(dict(
-                mode=args.mode, topic=args.topic, message_type=args.message_type,
-                speed=args.speed, amplitude=args.amplitude, period=args.period,
-                linear_accel=args.linear_accel, angular_accel=args.angular_accel,
-                estimate=motion_estimate(samples, args.footprint_radius, args.clearance)), indent=2) + '\n')
+            (args.record / 'excitation.json').write_text(
+                json.dumps(
+                    {
+                        'mode': args.mode,
+                        'topic': args.topic,
+                        'message_type': args.message_type,
+                        'speed': args.speed,
+                        'amplitude': args.amplitude,
+                        'period': args.period,
+                        'linear_accel': args.linear_accel,
+                        'angular_accel': args.angular_accel,
+                        'estimate': motion_estimate(
+                            samples, args.footprint_radius, args.clearance
+                        ),
+                    },
+                    indent=2,
+                )
+                + '\n'
+            )
         # Sleep a full period after each send: no catch-up bursts after scheduler stalls.
         # Slew increments were bounded for this minimum actual elapsed interval.
         for _, v, w in samples:
@@ -281,20 +342,42 @@ def make_parser():
     parser.add_argument('--topic', required=True)
     parser.add_argument('--message-type', required=True, choices=('Twist', 'TwistStamped'))
     parser.add_argument('--mode', required=True, choices=('spin', 'drive', 'straight', 'sine'))
-    parser.add_argument('--speed', type=float, required=True, help='forward target [m/s]; zero for spin')
-    parser.add_argument('--amplitude', type=float, required=True, help='yaw rate [rad/s]; zero for straight')
-    parser.add_argument('--linear-accel', type=float, required=True, help='forward slew limit [m/s^2]')
-    parser.add_argument('--angular-accel', type=float, required=True, help='yaw slew limit [rad/s^2]')
+    parser.add_argument(
+        '--speed', type=float, required=True, help='forward target [m/s]; zero for spin'
+    )
+    parser.add_argument(
+        '--amplitude', type=float, required=True, help='yaw rate [rad/s]; zero for straight'
+    )
+    parser.add_argument(
+        '--linear-accel', type=float, required=True, help='forward slew limit [m/s^2]'
+    )
+    parser.add_argument(
+        '--angular-accel', type=float, required=True, help='yaw slew limit [rad/s^2]'
+    )
     parser.add_argument('--period', type=float, required=True, help='command period [s]')
-    parser.add_argument('--footprint-radius', type=float, required=True, help='circumscribed body radius [m]')
-    parser.add_argument('--clearance', type=float, required=True, help='extra clearance around the footprint [m]')
+    parser.add_argument(
+        '--footprint-radius', type=float, required=True, help='circumscribed body radius [m]'
+    )
+    parser.add_argument(
+        '--clearance', type=float, required=True, help='extra clearance around the footprint [m]'
+    )
     parser.add_argument('--hold', type=float, default=1.0, help='hold/pulse interval [s]')
     parser.add_argument('--rest', type=float, default=1.0)
     parser.add_argument('--repeats', type=int, default=2)
     parser.add_argument('--frequency', type=float, default=0.5, help='sine frequency [Hz]')
-    parser.add_argument('--cycles', type=int, default=4, help='sine cycles including two-cycle rise and one-cycle fall')
+    parser.add_argument(
+        '--cycles',
+        type=int,
+        default=4,
+        help='sine cycles including two-cycle rise and one-cycle fall',
+    )
     parser.add_argument('--countdown', type=float, default=3.0)
-    parser.add_argument('--max-duration', type=float, default=60.0, help='wall-time bound from ROS startup through zero stop [s]; bag flushing is separate')
+    parser.add_argument(
+        '--max-duration',
+        type=float,
+        default=60.0,
+        help='wall-time bound from ROS startup through zero stop [s]; bag flushing is separate',
+    )
     parser.add_argument('--frame-id', default='base_link')
     parser.add_argument('--record', type=Path, help='new rosbag2 directory')
     parser.add_argument('--record-topics', nargs='+')
@@ -312,7 +395,11 @@ def main(argv=None):
         parser.error(str(exc))
     estimate = motion_estimate(samples, args.footprint_radius, args.clearance)
     print('Ideal command-following space estimate: ' + json.dumps(estimate), file=sys.stderr)
-    print('Open-loop motion: reserve additional measured stopping/lag space, clear the area, and keep a physical stop ready. Ctrl-C sends zero for 1 s.', file=sys.stderr)
+    print(
+        'Open-loop motion: reserve additional measured stopping/lag space, clear the area, '
+        'and keep a physical stop ready. Ctrl-C sends zero for 1 s.',
+        file=sys.stderr,
+    )
     if args.dry_run:
         writer = csv.writer(sys.stdout)
         writer.writerow(('t', 'v', 'w'))

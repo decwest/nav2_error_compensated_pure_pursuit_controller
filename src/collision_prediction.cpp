@@ -224,7 +224,8 @@ std::string ErrorCompensatedPurePursuitController::predictionPoseStatus(
 
 ErrorCompensatedPurePursuitController::PredictionResult ErrorCompensatedPurePursuitController::
 predictTracking(
-  const PredictionContext & context, const ControlStep & first, double stop_budget)
+  const PredictionContext & context, const ControlStep & first, double stop_budget,
+  double swept_speed_limit)
 {
   PredictionResult result;
   result.path.header = context.start.header;
@@ -255,8 +256,12 @@ predictTracking(
     // Do not creep back and forth within the first-contact refinement accuracy.
     // This only rounds toward an earlier stop and still respects the reachable window.
     const double contact_tolerance = costmap_->getResolution() / 512.0;
-    const double scale = std::isfinite(stop_budget) && available <= contact_tolerance ?
+    double scale = std::isfinite(stop_budget) && available <= contact_tolerance ?
       0.0 : brakingScale(command, context.radius, available);
+    const double requested_speed = sweptSpeed(command, context.radius);
+    if (requested_speed > swept_speed_limit) {
+      scale = std::min(scale, swept_speed_limit / requested_speed);
+    }
     if (scale < 1.0) {
       command.linear.x *= scale;
       command.linear.y *= scale;
@@ -350,8 +355,13 @@ geometry_msgs::msg::Twist ErrorCompensatedPurePursuitController::limitPredictedC
     checked = nominal;
     status = nominal.event;
     if (nominal.event == "collision" || nominal.event == "map_boundary") {
-      checked = predictTracking(
-        context, first, std::max(0.0, nominal.event_distance - collision_stop_margin_));
+      const double budget = std::max(0.0, nominal.event_distance - collision_stop_margin_);
+      checked = predictTracking(context, first, budget);
+      if (checked.event == "insufficient_braking_distance" && checked.steps > 0 && budget > 0.0) {
+        // A future dynamic window prevented late braking. Try carrying less speed
+        // from the first step, verifying the same footprint, budget and bounds.
+        checked = predictTracking(context, first, budget, budget / context.horizon);
+      }
       status = checked.event == "clear" ?
         (checked.first_scale < 1.0 ? "limited" : "obstacle_ahead") : checked.event;
     }

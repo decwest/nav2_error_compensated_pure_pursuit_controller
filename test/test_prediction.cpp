@@ -372,3 +372,24 @@ TEST_F(PredictionTest, MapBoundaryIsNotUnverifiedFreeSpace)
   EXPECT_EQ(c.predictTracking(context, first).event, "map_boundary");
   EXPECT_NO_THROW(c.limitPredictedCollision(context, first));
 }
+
+TEST_F(PredictionTest, EarlierSlowdownCanRecoverFutureBrakingFailure)
+{
+  PredictionHarness h;
+  auto & c = h.controller;
+  c.setPlan(h.straight(4., 2.5));
+  const auto speed = velocity(0., 0., -.8);
+  c.seed(speed);
+  for (double y = -1.; y < 1.; y += .04) {h.obstacle(1.125, y);}
+  const auto first = c.firstStep(h.pose, speed);
+  const auto context = c.makePredictionContext(h.pose, speed, speed);
+  const auto nominal = c.predictTracking(context, first);
+  ASSERT_EQ(nominal.event, "collision");
+  const double budget = nominal.event_distance - .3;
+  const auto late = c.predictTracking(context, first, budget);
+  ASSERT_EQ(late.event, "insufficient_braking_distance");
+  ASSERT_GT(late.steps, 0u);
+  const auto early = c.predictTracking(context, first, budget, budget / context.horizon);
+  ASSERT_EQ(early.event, "clear");
+  EXPECT_EQ(c.limitPredictedCollision(context, first), early.first_command);
+}

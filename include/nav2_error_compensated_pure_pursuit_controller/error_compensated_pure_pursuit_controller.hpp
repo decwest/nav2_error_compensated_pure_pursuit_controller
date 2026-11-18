@@ -124,7 +124,8 @@ protected:
     nav_msgs::msg::Path & plan, const geometry_msgs::msg::PoseStamped & pose) const;
   PredictionResult predictTracking(
     const PredictionContext & context, const ControlStep & first,
-    double stop_budget = std::numeric_limits<double>::infinity());
+    double stop_budget = std::numeric_limits<double>::infinity(),
+    double swept_speed_limit = std::numeric_limits<double>::infinity());
   geometry_msgs::msg::Twist limitPredictedCollision(
     const PredictionContext & context, const ControlStep & first);
   std::string predictionPoseStatus(const geometry_msgs::msg::PoseStamped & pose);

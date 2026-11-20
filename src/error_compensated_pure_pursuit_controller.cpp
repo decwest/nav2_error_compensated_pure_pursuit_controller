@@ -80,8 +80,10 @@ std::string validateEcppParameters(
     return "ECPP requires use_fixed_curvature_lookahead=false so that compensation and "
            "pure pursuit use the same nominal lookahead";
   }
-  if (v_gain_source != "commanded" && v_gain_source != "measured") {
-    return "ecpp.v_gain_source must be 'commanded' or 'measured'";
+  if (v_gain_source != "commanded" && v_gain_source != "measured" &&
+    v_gain_source != "nominal")
+  {
+    return "ecpp.v_gain_source must be 'commanded', 'measured', or 'nominal'";
   }
   return "";
 }
@@ -236,6 +238,61 @@ void ErrorCompensatedPurePursuitController::configure(
     node, plugin_name_, logger_, costmap_->getSizeInMetersX());
   params_ = param_handler_->getParams();
 
+  rcl_interfaces::msg::ParameterDescriptor fixed;
+  fixed.read_only = true;
+  const auto fixed_parameter = [&](const std::string & key, auto value) {
+      const auto parameter_name = name + "." + key;
+      declare_parameter_if_not_declared(
+        node.get(), parameter_name, rclcpp::ParameterValue(value), fixed);
+      return node->get_parameter(parameter_name).get_value<decltype(value)>();
+    };
+  const auto fixed_bool = [&](const std::string & key, bool value) {
+      return fixed_parameter(key, value);
+    };
+  const auto fixed_double = [&](const std::string & key, double value) {
+      const auto result = fixed_parameter(key, value);
+      if (!std::isfinite(result) || result <= 0.0) {
+        throw nav2_core::ControllerException(key + " must be finite and positive");
+      }
+      return result;
+    };
+  use_dynamic_window_ = fixed_bool("use_dynamic_window", false);
+  supervised_paths_ = fixed_bool("supervised_paths", false);
+  window_v_ = fixed_double("dwpp.max_linear_vel", 0.5);
+  window_w_ = fixed_double("dwpp.max_angular_vel", 1.0);
+  window_a_ = fixed_double("dwpp.max_linear_accel", 0.5);
+  window_alpha_ = fixed_double("dwpp.max_angular_accel", 1.5);
+  collision_prediction_mode_ = fixed_parameter(
+    "collision_prediction_mode", std::string("constant_velocity"));
+  collision_prediction_time_buffer_ = fixed_parameter("collision_prediction_time_buffer", 2.0);
+  collision_stop_margin_ = fixed_parameter("collision_stop_margin", 0.3);
+  collision_prediction_max_steps_ = fixed_parameter("collision_prediction_max_steps", int64_t{300});
+  publish_collision_prediction_ = fixed_bool("publish_collision_prediction", false);
+  if ((collision_prediction_mode_ != "constant_velocity" &&
+    collision_prediction_mode_ != "closed_loop") ||
+    !std::isfinite(collision_prediction_time_buffer_) || collision_prediction_time_buffer_ < 0.0 ||
+    !std::isfinite(collision_stop_margin_) || collision_stop_margin_ < 0.0 ||
+    collision_prediction_max_steps_ <= 0)
+  {
+    throw nav2_core::ControllerException("Invalid collision prediction configuration");
+  }
+  if (collision_prediction_mode_ == "closed_loop" && !use_dynamic_window_) {
+    throw nav2_core::ControllerException(
+            "closed_loop requires use_dynamic_window for braking limits");
+  }
+  declare_parameter_if_not_declared(
+    node.get(), name + ".ecpp.pending_path_stamp_ns", rclcpp::ParameterValue(int64_t{0}));
+  declare_parameter_if_not_declared(
+    node.get(), name + ".ecpp.pending_omega_n", rclcpp::ParameterValue(1.0));
+  // Cleanup invalidates prepared paths, even when ControllerServer creates a new plugin
+  // instance on the same node. Retain the replay boundary, but require a fresh preparation.
+  adopted_stamp_ns_ = std::max(
+    adopted_stamp_ns_, node->get_parameter(name + ".ecpp.pending_path_stamp_ns").as_int());
+  pending_stamp_ns_ = 0;
+  command_initialized_ = false;
+  adoption_pub_ = node->create_publisher<std_msgs::msg::Float64MultiArray>(
+    "/testbed/path_adopted", rclcpp::QoS(20).reliable());
+
   // ECPP-specific parameters.
   declare_parameter_if_not_declared(
     node.get(), name + ".ecpp.publish_debug", rclcpp::ParameterValue(false));
@@ -279,6 +336,11 @@ void ErrorCompensatedPurePursuitController::configure(
   if (!ecpp_validation_error.empty()) {
     throw nav2_core::ControllerException(ecpp_validation_error);
   }
+  if (use_dynamic_window_ &&
+    (params_->allow_reversing || params_->base_desired_linear_vel > window_v_))
+  {
+    throw nav2_core::ControllerException("DWPP mode requires forward motion within speed bound");
+  }
   // Plugin-local transformer retains the predecessor of the projection segment without changing
   // Navigation2's shared RPP implementation.
   ecpp_path_handler_ = std::make_unique<PathHandler>(
@@ -302,8 +364,19 @@ void ErrorCompensatedPurePursuitController::configure(
     "curvature_lookahead_point", 1);
   is_rotating_to_heading_pub_ = node->create_publisher<std_msgs::msg::Bool>(
     "is_rotating_to_heading", 1);
+  // Shim controllers qualify parameter names with dots. ROS topic tokens cannot
+  // contain dots; use a topic namespace without changing the parameter prefix.
+  std::string topic_prefix = plugin_name_;
+  std::replace(topic_prefix.begin(), topic_prefix.end(), '.', '/');
   ecpp_debug_pub_ = node->create_publisher<std_msgs::msg::Float64MultiArray>(
-    plugin_name_ + "/ecpp_debug", 1);
+    topic_prefix + "/ecpp_debug", 1);
+
+  nominal_prediction_pub_ = node->create_publisher<nav_msgs::msg::Path>(
+    topic_prefix + "/nominal_collision_arc", 1);
+  checked_prediction_pub_ = node->create_publisher<nav_msgs::msg::Path>(
+    topic_prefix + "/collision_arc", 1);
+  prediction_diagnostics_pub_ = node->create_publisher<diagnostic_msgs::msg::DiagnosticArray>(
+    topic_prefix + "/collision_prediction", 10);
 
   parameter_validation_handler_ = node->add_on_set_parameters_callback(
     std::bind(
@@ -339,9 +412,63 @@ geometry_msgs::msg::TwistStamped ErrorCompensatedPurePursuitController::computeV
   const auto transformed = ecpp_path_handler_->transformGlobalPlan(
     pose, params_->max_robot_pose_search_dist, params_->interpolate_curvature_after_goal);
   const auto & transformed_plan = transformed.path;
-  const auto & path_projection = transformed.projection;
   global_path_pub_->publish(transformed_plan);
 
+  ControlState state;
+  state.previous = command_initialized_ ? last_command_ : speed;
+  state.previous.linear.y = 0.0;
+  state.reached_xy = has_reached_xy_tolerance_;
+  state.finished_cancelling = finished_cancelling_;
+  const auto first = computeControlStep(
+    transformed, speed,
+    collision_checker_->costAtPose(pose.pose.position.x, pose.pose.position.y), state);
+  auto command = first.command;
+  carrot_pub_->publish(createCarrotMsg(first.carrot));
+  if (params_->use_fixed_curvature_lookahead) {
+    curvature_carrot_pub_->publish(createCarrotMsg(first.curvature_carrot));
+  }
+  if (ecpp_publish_debug_ && !first.rotating) {
+    const auto & terms = first.terms;
+    std_msgs::msg::Float64MultiArray message;
+    message.data = {terms.e_y, terms.e_psi, terms.sigma, terms.sigma_y, terms.sigma_psi,
+      terms.kappa_pp, terms.curvature, terms.v_gain, terms.lookahead_dist};
+    ecpp_debug_pub_->publish(message);
+  }
+  if (params_->use_collision_detection) {
+    if (collision_prediction_mode_ == "closed_loop") {
+      command = limitPredictedCollision(makePredictionContext(pose, state.previous, speed), first);
+    } else {
+      if (collision_checker_->isCollisionImminent(
+          pose, command.linear.x, command.angular.z,
+          std::hypot(first.carrot.pose.position.x, first.carrot.pose.position.y)))
+      {
+        throw nav2_core::NoValidControl(
+                "ErrorCompensatedPurePursuitController detected collision ahead!");
+      }
+    }
+  }
+  is_rotating_to_heading_ = first.rotating;
+  has_reached_xy_tolerance_ = first.state.reached_xy;
+  finished_cancelling_ = first.state.finished_cancelling;
+  std_msgs::msg::Bool rotating;
+  rotating.data = is_rotating_to_heading_;
+  is_rotating_to_heading_pub_->publish(rotating);
+  geometry_msgs::msg::TwistStamped cmd_vel;
+  cmd_vel.header = pose.header;
+  cmd_vel.twist = command;
+  last_command_ = command;
+  command_initialized_ = true;
+  return cmd_vel;
+}
+
+ErrorCompensatedPurePursuitController::ControlStep
+ErrorCompensatedPurePursuitController::computeControlStep(
+  const PathHandler::TransformedPlan & transformed,
+  const geometry_msgs::msg::Twist & speed, double pose_cost, ControlState state)
+{
+  ControlStep result;
+  const auto & transformed_plan = transformed.path;
+  const auto & path_projection = transformed.projection;
   // Find look ahead distance and point on path and publish. The nominal distance is retained for
   // the PP-equivalent ECPP gains even if the carrot distance is shortened at a reversing cusp.
   const double nominal_lookahead_dist = getLookAheadDistance(speed);
@@ -364,7 +491,7 @@ geometry_msgs::msg::TwistStamped ErrorCompensatedPurePursuitController::computeV
   auto carrot_pose = arc_length_lookahead::getLookAheadPoint(
     lookahead_dist, transformed_plan, path_projection);
   auto rotate_to_path_carrot_pose = carrot_pose;
-  carrot_pub_->publish(createCarrotMsg(carrot_pose));
+  result.carrot = carrot_pose;
 
   double linear_vel, angular_vel;
 
@@ -376,7 +503,7 @@ geometry_msgs::msg::TwistStamped ErrorCompensatedPurePursuitController::computeV
       curv_lookahead_dist, transformed_plan, path_projection);
     rotate_to_path_carrot_pose = curvature_lookahead_pose;
     regulation_curvature = calculateCurvature(curvature_lookahead_pose.pose.position);
-    curvature_carrot_pub_->publish(createCarrotMsg(curvature_lookahead_pose));
+    result.curvature_carrot = curvature_lookahead_pose;
   }
 
   // Setting the velocity direction
@@ -388,18 +515,26 @@ geometry_msgs::msg::TwistStamped ErrorCompensatedPurePursuitController::computeV
   linear_vel = params_->desired_linear_vel;
 
   double angle_to_heading;
-  if (shouldRotateToGoalHeading(carrot_pose)) {
-    is_rotating_to_heading_ = true;
+  const double carrot_distance = std::hypot(
+    carrot_pose.pose.position.x, carrot_pose.pose.position.y);
+  const bool near_goal = carrot_distance < goal_dist_tol_;
+  if (params_->use_rotate_to_heading && params_->stateful && near_goal) {
+    state.reached_xy = true;
+  }
+  if (params_->use_rotate_to_heading &&
+    (params_->stateful ? state.reached_xy : near_goal))
+  {
+    result.rotating = true;
     double angle_to_goal = tf2::getYaw(transformed_plan.poses.back().pose.orientation);
     rotateToHeading(linear_vel, angular_vel, angle_to_goal, speed);
   } else if (shouldRotateToPath(rotate_to_path_carrot_pose, angle_to_heading, x_vel_sign)) {
-    is_rotating_to_heading_ = true;
+    result.rotating = true;
     rotateToHeading(linear_vel, angular_vel, angle_to_heading, speed);
   } else {
-    is_rotating_to_heading_ = false;
+    result.rotating = false;
     applyConstraints(
       regulation_curvature, speed,
-      collision_checker_->costAtPose(pose.pose.position.x, pose.pose.position.y), transformed_plan,
+      pose_cost, transformed_plan,
       linear_vel, x_vel_sign);
 
     if (cancelling_) {
@@ -409,17 +544,17 @@ geometry_msgs::msg::TwistStamped ErrorCompensatedPurePursuitController::computeV
       if (x_vel_sign > 0) {
         if (linear_vel <= 0) {
           linear_vel = 0;
-          finished_cancelling_ = true;
+          state.finished_cancelling = true;
         }
       } else {
         if (linear_vel >= 0) {
           linear_vel = 0;
-          finished_cancelling_ = true;
+          state.finished_cancelling = true;
         }
       }
     }
 
-    ecpp_math::EcppTerms terms;
+    auto & terms = result.terms;
     terms.kappa_pp = regulation_curvature;
     terms.curvature = regulation_curvature;
     terms.lookahead_dist = nominal_lookahead_dist;
@@ -428,8 +563,9 @@ geometry_msgs::msg::TwistStamped ErrorCompensatedPurePursuitController::computeV
       const auto path_error = ecpp_math::computePathFrameError(
         path_projection);
       const double v_for_gain =
-        (ecpp_v_gain_source_ == "measured") ?
-        std::fabs(speed.linear.x) : std::fabs(linear_vel);
+        (ecpp_v_gain_source_ == "nominal") ? params_->base_desired_linear_vel :
+        ((ecpp_v_gain_source_ == "measured") ?
+        std::fabs(speed.linear.x) : std::fabs(linear_vel));
 
       ecpp_math::EcppParams active_params = ecpp_params_;
       if (!path_error.valid || x_vel_sign < 0.0) {
@@ -458,37 +594,30 @@ geometry_msgs::msg::TwistStamped ErrorCompensatedPurePursuitController::computeV
 
     regulation_curvature = terms.curvature;
     angular_vel = linear_vel * regulation_curvature;
+  }
 
-    if (ecpp_publish_debug_) {
-      std_msgs::msg::Float64MultiArray debug_msg;
-      debug_msg.data = {
-        terms.e_y, terms.e_psi, terms.sigma, terms.sigma_y, terms.sigma_psi,
-        terms.kappa_pp, regulation_curvature, terms.v_gain, terms.lookahead_dist};
-      ecpp_debug_pub_->publish(debug_msg);
+  if (use_dynamic_window_) {
+    result.bounds = window_.computeDynamicWindow(
+      state.previous, window_v_, 0.0, window_w_, -window_w_,
+      window_a_, -window_a_, window_alpha_, -window_alpha_, control_duration_);
+    if (result.rotating) {
+      const auto & bounds = result.bounds;
+      linear_vel = std::clamp(0.0, bounds.min_linear_vel, bounds.max_linear_vel);
+      angular_vel = std::clamp(angular_vel, bounds.min_angular_vel, bounds.max_angular_vel);
+    } else {
+      window_.applyRegulationToDynamicWindow(linear_vel, result.bounds);
+      std::tie(linear_vel, angular_vel) = window_.computeDynamicWindowVelocities(
+        state.previous, window_v_, 0.0, window_w_, -window_w_,
+        window_a_, -window_a_, window_alpha_, -window_alpha_,
+        linear_vel, regulation_curvature, 1.0, control_duration_);
     }
   }
 
-  // Collision checking on this velocity heading
-  const double & carrot_dist = hypot(carrot_pose.pose.position.x, carrot_pose.pose.position.y);
-  if (params_->use_collision_detection &&
-    collision_checker_->isCollisionImminent(pose, linear_vel, angular_vel, carrot_dist))
-  {
-    throw nav2_core::NoValidControl(
-            "ErrorCompensatedPurePursuitController detected collision ahead!");
-  }
-
-  // Publish whether we are rotating to goal heading
-  std_msgs::msg::Bool is_rotating_to_heading_msg;
-  is_rotating_to_heading_msg.data = is_rotating_to_heading_;
-  is_rotating_to_heading_pub_->publish(is_rotating_to_heading_msg);
-
-  // populate and return message
-  geometry_msgs::msg::TwistStamped cmd_vel;
-  cmd_vel.header = pose.header;
-  cmd_vel.twist.linear.x = linear_vel;
-  cmd_vel.twist.angular.z = angular_vel;
-
-  return cmd_vel;
+  result.command.linear.x = linear_vel;
+  result.command.angular.z = angular_vel;
+  state.previous = result.command;
+  result.state = state;
+  return result;
 }
 
 rcl_interfaces::msg::SetParametersResult
@@ -505,6 +634,46 @@ ErrorCompensatedPurePursuitController::validateParameterUpdates(
     return result;
   }
 
+  bool has_stamp = false, has_omega = false;
+  for (const auto & p : parameters) {
+    if (p.get_name() == plugin_name_ + ".ecpp.pending_path_stamp_ns") {
+      has_stamp = true;
+      if (p.get_type() != rclcpp::ParameterType::PARAMETER_INTEGER ||
+        p.as_int() <= adopted_stamp_ns_)
+      {
+        result.successful = false;
+        result.reason = "pending path stamp must be newer than adopted path";
+        return result;
+      }
+    }
+    if (p.get_name() == plugin_name_ + ".ecpp.pending_omega_n") {
+      has_omega = true;
+      if (p.get_type() != rclcpp::ParameterType::PARAMETER_DOUBLE ||
+        !std::isfinite(p.as_double()) || p.as_double() <= 0.0)
+      {
+        result.successful = false;
+        result.reason = "pending frequency must be finite and positive";
+        return result;
+      }
+    }
+    if (supervised_paths_ && p.get_name() == plugin_name_ + ".ecpp.omega_n") {
+      result.successful = false;
+      result.reason = "supervised paths require an atomic pending path/frequency pair";
+      return result;
+    }
+  }
+  if (has_stamp != has_omega) {
+    result.successful = false;
+    result.reason = "pending stamp and frequency must be set atomically";
+    return result;
+  }
+  if (use_dynamic_window_ && (state.desired_linear_vel > window_v_ ||
+    state.use_fixed_curvature_lookahead))
+  {
+    result.successful = false;
+    result.reason = "dynamic-window nominal speed or lookahead is incompatible";
+    return result;
+  }
   result.reason = validateEcppParameters(
     state.ecpp_params, state.desired_linear_vel, state.max_angular_accel,
     state.use_fixed_curvature_lookahead, state.v_gain_source);
@@ -527,6 +696,14 @@ void ErrorCompensatedPurePursuitController::updateParameters(
     return;
   }
 
+  for (const auto & p : parameters) {
+    if (p.get_name() == plugin_name_ + ".ecpp.pending_path_stamp_ns") {
+      pending_stamp_ns_ = p.as_int();
+    }
+    if (p.get_name() == plugin_name_ + ".ecpp.pending_omega_n") {
+      pending_omega_n_ = p.as_double();
+    }
+  }
   ecpp_publish_debug_ = state.publish_debug;
   ecpp_params_ = state.ecpp_params;
   ecpp_v_gain_source_ = state.v_gain_source;
@@ -536,19 +713,41 @@ void ErrorCompensatedPurePursuitController::activate()
 {
   RegulatedPurePursuitController::activate();
   ecpp_debug_pub_->on_activate();
+  nominal_prediction_pub_->on_activate();
+  checked_prediction_pub_->on_activate();
+  prediction_diagnostics_pub_->on_activate();
 }
 
 void ErrorCompensatedPurePursuitController::setPlan(const nav_msgs::msg::Path & path)
 {
   std::lock_guard<std::mutex> lock_reinit(param_handler_->getMutex());
   has_reached_xy_tolerance_ = false;
-  ecpp_path_handler_->setPlan(path);
+  const int64_t stamp = rclcpp::Time(path.header.stamp).nanoseconds();
+  if (path.poses.size() < 2 ||
+    (supervised_paths_ && (stamp != pending_stamp_ns_ || stamp <= adopted_stamp_ns_)))
+  {
+    throw nav2_core::InvalidPath("Unprepared, stale, or empty supervised path");
+  }
+  if (stamp == pending_stamp_ns_) {
+    ecpp_params_.omega_n = pending_omega_n_;
+  }
+  ecpp_path_handler_->setPlan(path);  // replaces pruned path and resets projection/carrot search
+  adopted_stamp_ns_ = stamp;
+  std_msgs::msg::Float64MultiArray msg;
+  msg.data = {clock_->now().seconds(), static_cast<double>(path.header.stamp.sec),
+    static_cast<double>(path.header.stamp.nanosec), ecpp_params_.omega_n,
+    path.poses.front().pose.position.x, path.poses.front().pose.position.y};
+  adoption_pub_->publish(msg);
 }
 
 void ErrorCompensatedPurePursuitController::deactivate()
 {
   RegulatedPurePursuitController::deactivate();
   ecpp_debug_pub_->on_deactivate();
+  nominal_prediction_pub_->on_deactivate();
+  checked_prediction_pub_->on_deactivate();
+  prediction_diagnostics_pub_->on_deactivate();
+  command_initialized_ = false;
 }
 
 void ErrorCompensatedPurePursuitController::cleanup()
@@ -565,11 +764,16 @@ void ErrorCompensatedPurePursuitController::cleanup()
   RegulatedPurePursuitController::cleanup();
   ecpp_path_handler_.reset();
   ecpp_debug_pub_.reset();
+  adoption_pub_.reset();
+  nominal_prediction_pub_.reset();
+  checked_prediction_pub_.reset();
+  prediction_diagnostics_pub_.reset();
 }
 
 void ErrorCompensatedPurePursuitController::reset()
 {
   std::lock_guard<std::mutex> lock_reinit(param_handler_->getMutex());
+  command_initialized_ = false;
   cancelling_ = false;
   finished_cancelling_ = false;
   has_reached_xy_tolerance_ = false;

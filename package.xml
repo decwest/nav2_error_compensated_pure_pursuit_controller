@@ -12,12 +12,14 @@
   <depend>angles</depend>
   <depend>nav2_common</depend>
   <depend>nav2_core</depend>
+  <depend>nav2_dynamic_window_pure_pursuit_controller</depend>
   <depend>nav2_util</depend>
   <depend>nav2_costmap_2d</depend>
   <depend>nav2_regulated_pure_pursuit_controller</depend>
   <depend>rclcpp</depend>
   <depend>rcl_interfaces</depend>
   <depend>geometry_msgs</depend>
+  <depend>diagnostic_msgs</depend>
   <depend>nav_msgs</depend>
   <depend>nav2_msgs</depend>
   <depend>std_msgs</depend>

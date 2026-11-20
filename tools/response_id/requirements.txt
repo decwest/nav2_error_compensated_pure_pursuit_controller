@@ -1,0 +1,5 @@
+# Required for fitting CSV time series; excitation and margin calculation use the standard library.
+numpy>=1.24
+# Optional for ROS-free rosbag2 reading: pip install 'rosbags>=0.10'
+# Optional for --plot: pip install 'matplotlib>=3.6'
+# Development tests: pip install 'pytest>=7'

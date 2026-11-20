@@ -378,3 +378,21 @@ int main(int argc, char ** argv)
   testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
 }
+
+TEST(EcppTerms, NominalSceneBGainsMatchPhysicalDesignNumerically)
+{
+  ecpp_math::EcppParams params;
+  params.omega_n = 3.06;
+  params.zeta = 1.0;
+  params.gate_mode = GateMode::ALWAYS_ON;
+  for (const double epsilon : {0.01, 0.05, 0.1}) {
+    params.v_epsilon = epsilon;
+    for (const double lookahead : {0.5, 1.0, 2.0}) {
+      const auto terms = ecpp_math::computeEcppTerms(
+        0.0, 0.01, 0.02, lookahead, 0.5, 0.5, params);
+      EXPECT_NEAR(terms.v_gain, 0.5 + epsilon, 1e-12);
+      EXPECT_NEAR(terms.dK_y + 2.0 / (lookahead * lookahead), 37.4544, 1e-12);
+      EXPECT_NEAR(terms.dK_psi + 2.0 / lookahead, 12.24, 1e-12);
+    }
+  }
+}
